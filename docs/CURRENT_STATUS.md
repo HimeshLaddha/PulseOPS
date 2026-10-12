@@ -20,23 +20,37 @@ All 5 progressive scenarios were executed against the direct-persistence FastAPI
 
 ---
 
-## Key Performance Findings
+### 3. Measured Bottleneck Analysis: Facts vs. Working Hypotheses
 
-1. **Empirical Throughput Ceiling:**
-   - Peak sustained ingestion throughput is **13,097.58 spans/second** (Scenario D: 100 spans/req, Concurrency 10).
-2. **Batching Efficiency:**
-   - Packing 10 spans per request amortizes round-trip network and WAL commit overhead, yielding an immediate **9.8x throughput increase** (from 120 to 1,184 spans/s) with flat p50 (~8.0 ms) and p95 (~10.7 ms) latency.
-3. **Pool Boundary Breakdown (Scenario E):**
-   - With client concurrency (25) exceeding `DB_POOL_MAX_SIZE = 20`, connection checkout queuing and synchronous WAL commit contention degraded throughput by **33.7%** (down to 8,679 spans/s).
-   - Latency collapsed under contention: p50 rose to **227.48 ms**, p95 reached **611.47 ms**, and p99 reached **991.33 ms** (max: 1.62 s).
-4. **Architectural Recommendation:**
-   - Recorded in [docs/DECISION_LOG.md](file:///c:/Users/Admin/OneDrive/Desktop/PulseOPS/docs/DECISION_LOG.md) as proposed **ADR-002**. An asynchronous ingestion buffer (e.g., Redis Streams) is justified to decouple caller response times from database disk flushes under high concurrency.
+#### A. Empirical Facts (Verified by Measurement)
+- Direct PostgreSQL persistence achieves a sweet spot around **13,098 spans/sec** at concurrency 10 (Scenario D) with $p_{50} = 68.66\text{ ms}$ and $p_{95} = 91.81\text{ ms}$.
+- Under concurrency 25 (Scenario E), throughput dropped by 33.7% to **8,679 spans/sec**, while $p_{95}$ degraded to **611.47 ms** and $p_{99}$ touched **991.33 ms** (Max: 1,616 ms).
+- **Core Platform Takeaway:** Synchronous persistence couples the monitored application's request duration directly to database write latency, causing client tail latency to exceed 600 ms–1.6 s during high concurrency.
+
+#### B. Working Hypotheses (Unisolated Contributors)
+The exact internal source of the Scenario E degradation remains unisolated among three concurrent factors:
+1. *Connection pool checkout queuing:* 25 workers competed for `DB_POOL_MAX_SIZE = 20`.
+2. *PostgreSQL WAL disk contention:* 20 active parallel transactions committing under `synchronous_commit = on`.
+3. *Python event loop CPU overhead:* Synchronous Pydantic v2 validation and list parsing on a single core during parallel requests.
 
 ---
 
-## Day 1 Foundation Tracking (Reference)
+### 4. Proposed Direction & Hypotheses to Validate
+We hypothesize that decoupling ingestion via an in-memory or append-only stream (such as **Redis Streams**) will insulate telemetry callers from storage write latency:
 
-- [x] Checkpoint 1: Project Structure & Memory Initialization
-- [x] Checkpoint 2: Schemas & Database Lifecycle
-- [x] Checkpoint 3: Endpoints Implementation
-- [x] Checkpoint 4: Day 1 Verification Suite (6/6 Scenarios Passed)
+- **Target Metric to Validate:** Can an asynchronous ingestion gateway sustain $p_{95} < 20\text{ ms}$ under Scenario E concurrency (25 workers) by returning `HTTP 202 Accepted` after appending to a stream buffer?
+- **Durability Trade-off & Contract Definition:** 
+  `HTTP 202 Accepted` signals that telemetry has been safely accepted into the temporary buffer, *not* that it has been flushed to PostgreSQL disk.
+  - *Failure mode to address:* If the stream buffer restarts or a worker crashes before bulk insertion, in-flight spans in memory could be lost unless backed by Redis append-only files (AOF) and consumer group acknowledgments (`XACK` after DB commit).
+- **Next Step:** Build a prototype of the decoupled stream + consumer worker to empirically measure whether this architecture resolves the Scenario E latency regression without unacceptable durability trade-offs.
+
+---
+
+## Current Status & Benchmarks
+
+- [x] **Day 1: Grounded Foundation** — Direct PostgreSQL persistence, OTel W3C schema validation, idempotent upserts, and trace DAG queries.
+- [x] **Day 2: Performance Baseline** — 5-scenario benchmark matrix completed across 177,100 spans with zero data loss.
+  - **Peak Throughput:** ~13,098 spans/sec at $p_{95} = 91.81\text{ ms}$ (concurrency 10, batch 100).
+  - **Observed Boundary:** Concurrency 25 caused a 33.7% throughput drop and elongated $p_{95}$ to $611.47\text{ ms}$.
+  - Full findings and artifacts recorded in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) (ADR-002) and [`backend/benchmarks/results/`](backend/benchmarks/results/).
+- [ ] **Day 3: Decoupled Ingestion Prototype** — Evaluating asynchronous stream buffering to test caller insulation under burst load.

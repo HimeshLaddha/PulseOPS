@@ -64,6 +64,10 @@ coverage.xml
 *.db
 pgdata/
 
+# Benchmarks
+backend/benchmarks/results/
+benchmarks/results/
+
 # IDEs & Editors
 .vscode/
 .idea/
