@@ -1,0 +1,58 @@
+{
+  "run_id": "run_b3bba556635c",
+  "timestamp_utc": "2026-10-12T14:23:00.624430+00:00",
+  "target_base_url": "http://127.0.0.1:8000",
+  "system_metadata": {
+    "python_version": "3.10.10 (tags/v3.10.10:aad5f6a, Feb  7 2023, 17:20:36) [MSC v.1929 64 bit (AMD64)]",
+    "platform": "Windows-10-10.0.26300-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 186 Stepping 3, GenuineIntel",
+    "cpu_count": 12
+  },
+  "database_config": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "pulseops_db",
+    "pool_min_size": 5,
+    "pool_max_size": 20
+  },
+  "scenarios": [
+    {
+      "scenario_id": "D",
+      "name": "Scenario D: Large Batches",
+      "spans_per_req": 100,
+      "concurrency": 10,
+      "total_requests": 500,
+      "warmup_requests": 10,
+      "wall_time_s": 3.8175,
+      "throughput": {
+        "requests_per_sec": 130.98,
+        "api_spans_per_sec": 13097.58,
+        "persisted_spans_per_sec": 13097.58
+      },
+      "status_code_distribution": {
+        "201": 500
+      },
+      "client_errors": {
+        "timeouts": 0,
+        "exceptions": 0
+      },
+      "latency_ms": {
+        "min": 57.75,
+        "mean": 74.83,
+        "p50": 68.66,
+        "p90": 85.45,
+        "p95": 91.81,
+        "p99": 257.22,
+        "max": 297.2
+      },
+      "db_verification": {
+        "expected_spans": 50000,
+        "api_inserted_count": 50000,
+        "db_persisted_count": 50000,
+        "discrepancy": 0,
+        "verified": true
+      }
+    }
+  ]
+}

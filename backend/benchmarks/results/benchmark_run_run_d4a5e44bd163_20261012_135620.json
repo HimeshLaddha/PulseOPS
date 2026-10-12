@@ -1,0 +1,58 @@
+{
+  "run_id": "run_d4a5e44bd163",
+  "timestamp_utc": "2026-10-12T13:56:20.311390+00:00",
+  "target_base_url": "http://127.0.0.1:8000",
+  "system_metadata": {
+    "python_version": "3.10.10 (tags/v3.10.10:aad5f6a, Feb  7 2023, 17:20:36) [MSC v.1929 64 bit (AMD64)]",
+    "platform": "Windows-10-10.0.26300-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 186 Stepping 3, GenuineIntel",
+    "cpu_count": 12
+  },
+  "database_config": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "pulseops_db",
+    "pool_min_size": 5,
+    "pool_max_size": 20
+  },
+  "scenarios": [
+    {
+      "scenario_id": "A",
+      "name": "Scenario A: Smoke Test",
+      "spans_per_req": 1,
+      "concurrency": 1,
+      "total_requests": 100,
+      "warmup_requests": 10,
+      "wall_time_s": 0.8297,
+      "throughput": {
+        "requests_per_sec": 120.53,
+        "api_spans_per_sec": 120.53,
+        "persisted_spans_per_sec": 120.53
+      },
+      "status_code_distribution": {
+        "201": 100
+      },
+      "client_errors": {
+        "timeouts": 0,
+        "exceptions": 0
+      },
+      "latency_ms": {
+        "min": 6.13,
+        "mean": 8.24,
+        "p50": 7.99,
+        "p90": 10.01,
+        "p95": 10.7,
+        "p99": 11.61,
+        "max": 11.67
+      },
+      "db_verification": {
+        "expected_spans": 100,
+        "api_inserted_count": 100,
+        "db_persisted_count": 100,
+        "discrepancy": 0,
+        "verified": true
+      }
+    }
+  ]
+}
