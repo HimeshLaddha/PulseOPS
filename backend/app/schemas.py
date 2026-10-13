@@ -113,3 +113,9 @@ class TraceResponse(BaseModel):
 class IngestResponse(BaseModel):
     status: Literal["accepted"] = "accepted"
     inserted_count: int
+
+
+class SpanBatchQueuedResponse(BaseModel):
+    status: str = "queued"
+    stream_id: str
+    span_count: int

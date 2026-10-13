@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 # pyright: ignore [reportMissingImports]
 import asyncpg
 import httpx
+import redis.asyncio as aioredis
 
 # Add backend directory to sys.path if running directly
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -129,16 +130,26 @@ def generate_span_batch(
 
 
 class BenchmarkHarness:
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, run_id: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BASE_URL,
+        run_id: Optional[str] = None,
+        mode: str = "direct",
+    ):
         self.base_url = base_url.rstrip("/")
         self.run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        self.mode = mode
         self.settings = get_settings()
+        self.redis_client = aioredis.from_url(self.settings.redis_url, decode_responses=True)
         os.makedirs(RESULTS_DIR, exist_ok=True)
 
+    async def close(self):
+        await self.redis_client.aclose()
+
     async def preflight_healthcheck(self) -> Dict[str, Any]:
-        """Verify API and database pool availability prior to benchmarking."""
+        """Verify API, database pool, and Redis availability prior to benchmarking."""
         print("\n" + "=" * 75)
-        print(f"PRE-FLIGHT CHECK: Pinging {self.base_url}/health ...")
+        print(f"PRE-FLIGHT CHECK: Pinging {self.base_url}/health (Mode: {self.mode}) ...")
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 resp = await client.get(f"{self.base_url}/health")
@@ -149,6 +160,8 @@ class BenchmarkHarness:
                 data = resp.json()
                 if data.get("status") != "healthy" or data.get("database") != "connected":
                     raise RuntimeError(f"API reporting degraded health: {data}")
+                if self.mode == "stream" and data.get("redis") != "connected":
+                    raise RuntimeError(f"API reporting Redis disconnected: {data}")
                 print(f"[OK] API Health Check Passed: {data}")
                 return data
             except Exception as exc:
@@ -184,10 +197,12 @@ class BenchmarkHarness:
     async def run_warmup(
         self, client: httpx.AsyncClient, scenario_id: str, spans_per_req: int, warmup_requests: int
     ):
-        """Execute unmetered warm-up requests to prime HTTP and DB connection pools."""
-        print(f"\n[WARM-UP] Executing {warmup_requests} unmetered requests (spans/req: {spans_per_req}) ...")
+        """Execute unmetered warm-up requests to prime HTTP and DB/Redis connection pools."""
+        print(f"\n[WARM-UP] Executing {warmup_requests} unmetered requests (spans/req: {spans_per_req}, mode: {self.mode}) ...")
         warmup_run_id = f"{self.run_id}_warmup"
         warmup_successes = 0
+        target_url = f"{self.base_url}/v1/telemetry/spans?mode={self.mode}"
+        expected_status = 202 if self.mode == "stream" else 201
 
         for i in range(warmup_requests):
             payload = generate_span_batch(
@@ -199,13 +214,27 @@ class BenchmarkHarness:
                 req_index=i,
             )
             try:
-                resp = await client.post(f"{self.base_url}/v1/telemetry/spans", json=payload)
-                if resp.status_code == 201:
+                resp = await client.post(target_url, json=payload)
+                if resp.status_code == expected_status:
                     warmup_successes += 1
             except Exception as e:
                 print(f"[WARM-UP WARNING] Request {i} encountered error: {e}")
 
         print(f"[WARM-UP COMPLETE] {warmup_successes}/{warmup_requests} requests succeeded. Metrics reset.\n")
+        if self.mode == "stream":
+            # Wait briefly for background worker to drain warmup messages before starting timed benchmark
+            for _ in range(60):
+                try:
+                    sl = await self.redis_client.xlen(self.settings.REDIS_STREAM_KEY)
+                    pi = await self.redis_client.xpending(
+                        self.settings.REDIS_STREAM_KEY, self.settings.REDIS_CONSUMER_GROUP
+                    )
+                    p_cnt = pi.get("pending", 0) if isinstance(pi, dict) else 0
+                    if sl == 0 and p_cnt == 0:
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.05)
 
     async def execute_scenario(self, scenario_id: str) -> Dict[str, Any]:
         """Execute a single benchmark scenario and compute rigorous performance metrics."""
@@ -218,7 +247,7 @@ class BenchmarkHarness:
         expected_spans = total_requests * spans_per_req
 
         print("=" * 75)
-        print(f"STARTING {name.upper()}")
+        print(f"STARTING {name.upper()} [Mode: {self.mode.upper()}]")
         print(f"  Configuration : {spans_per_req} spans/req | Concurrency: {concurrency} | Total Reqs: {total_requests}")
         print(f"  Total Spans   : {expected_spans}")
         print(f"  Run ID        : {self.run_id}")
@@ -229,6 +258,8 @@ class BenchmarkHarness:
             max_connections=max(100, concurrency * 4),
         )
         timeout = httpx.Timeout(30.0, connect=10.0)
+        target_url = f"{self.base_url}/v1/telemetry/spans?mode={self.mode}"
+        expected_status = 202 if self.mode == "stream" else 201
 
         async with httpx.AsyncClient(limits=limits, timeout=timeout) as client:
             # 1. Warm-up Phase
@@ -240,11 +271,11 @@ class BenchmarkHarness:
             status_codes: Dict[int, int] = {}
             client_exceptions: int = 0
             client_timeouts: int = 0
-            api_inserted_total: int = 0
+            api_accepted_total: int = 0
             lock = asyncio.Lock()
 
             async def worker(req_index: int, worker_id: int):
-                nonlocal client_exceptions, client_timeouts, api_inserted_total
+                nonlocal client_exceptions, client_timeouts, api_accepted_total
                 payload = generate_span_batch(
                     service_name=f"benchmark-service-{scenario_id.lower()}",
                     spans_count=spans_per_req,
@@ -258,24 +289,27 @@ class BenchmarkHarness:
                     t_start = time.perf_counter()
                     try:
                         resp = await client.post(
-                            f"{self.base_url}/v1/telemetry/spans",
+                            target_url,
                             json=payload,
                         )
                         t_elapsed = (time.perf_counter() - t_start) * 1000.0  # ms
                         code = resp.status_code
 
-                        inserted = 0
-                        if code == 201:
+                        accepted = 0
+                        if code == expected_status:
                             try:
                                 body = resp.json()
-                                inserted = body.get("inserted_count", 0)
+                                if self.mode == "stream":
+                                    accepted = body.get("span_count", spans_per_req)
+                                else:
+                                    accepted = body.get("inserted_count", spans_per_req)
                             except Exception:
-                                inserted = spans_per_req
+                                accepted = spans_per_req
 
                         async with lock:
                             latencies_ms.append(t_elapsed)
                             status_codes[code] = status_codes.get(code, 0) + 1
-                            api_inserted_total += inserted
+                            api_accepted_total += accepted
 
                     except httpx.TimeoutException:
                         t_elapsed = (time.perf_counter() - t_start) * 1000.0
@@ -288,13 +322,50 @@ class BenchmarkHarness:
                             client_exceptions += 1
                             latencies_ms.append(t_elapsed)
 
-            # 3. Timed Measurement Phase
+            # 3. Timed Measurement Phase (API Enqueuing)
             wall_start = time.perf_counter()
             tasks = [worker(i, i % concurrency) for i in range(total_requests)]
             await asyncio.gather(*tasks)
-            wall_time_s = time.perf_counter() - wall_start
+            api_wall_time_s = time.perf_counter() - wall_start
 
-        # 4. Latency Percentiles
+        # 3b. Monitored Drain Phase (in stream mode)
+        drain_phase_duration_s = 0.0
+        total_pipeline_time_s = api_wall_time_s
+        if self.mode == "stream":
+            print("[DRAIN] Monitoring Redis stream and PostgreSQL persistence until stream is drained ...")
+            drain_start = time.perf_counter()
+            timeout_s = 120.0
+            drained = False
+
+            while (time.perf_counter() - drain_start) < timeout_s:
+                try:
+                    stream_len = await self.redis_client.xlen(self.settings.REDIS_STREAM_KEY)
+                    pending_info = await self.redis_client.xpending(
+                        self.settings.REDIS_STREAM_KEY, self.settings.REDIS_CONSUMER_GROUP
+                    )
+                    pending_count = (
+                        pending_info.get("pending", 0)
+                        if isinstance(pending_info, dict)
+                        else (pending_info[0] if isinstance(pending_info, (list, tuple)) else 0)
+                    )
+                except Exception:
+                    stream_len = -1
+                    pending_count = -1
+
+                current_db = await self.query_db_span_count(self.run_id, scenario_id)
+                if stream_len == 0 and pending_count == 0 and current_db >= expected_spans:
+                    drained = True
+                    break
+                await asyncio.sleep(0.05)
+
+            drain_phase_duration_s = time.perf_counter() - drain_start
+            total_pipeline_time_s = api_wall_time_s + drain_phase_duration_s
+            if not drained:
+                print(f"[DRAIN WARNING] Timed out waiting for stream drain after {timeout_s}s! stream_len={stream_len}, pending={pending_count}")
+            else:
+                print(f"[DRAIN COMPLETE] Stream drained and verified in {drain_phase_duration_s:.3f} s.")
+
+        # 4. Latency Percentiles (API Client Perspective)
         latencies_ms.sort()
         count_latencies = len(latencies_ms)
         min_lat = min(latencies_ms) if latencies_ms else 0.0
@@ -306,21 +377,24 @@ class BenchmarkHarness:
         p99 = calculate_percentile(latencies_ms, 99.0)
 
         # 5. Throughput Calculations
-        req_throughput = (total_requests / wall_time_s) if wall_time_s > 0 else 0.0
-        api_span_throughput = (api_inserted_total / wall_time_s) if wall_time_s > 0 else 0.0
+        req_throughput = (total_requests / api_wall_time_s) if api_wall_time_s > 0 else 0.0
+        api_span_throughput = (api_accepted_total / api_wall_time_s) if api_wall_time_s > 0 else 0.0
 
         # 6. Database Verification (Isolated by benchmark.run_id)
         print("[VERIFICATION] Querying PostgreSQL for persisted spans with benchmark.run_id ...")
         db_persisted_count = await self.query_db_span_count(self.run_id, scenario_id)
-        persisted_span_throughput = (db_persisted_count / wall_time_s) if wall_time_s > 0 else 0.0
-        discrepancy = db_persisted_count - api_inserted_total
+        persisted_span_throughput = (db_persisted_count / total_pipeline_time_s) if total_pipeline_time_s > 0 else 0.0
+        discrepancy = db_persisted_count - api_accepted_total
         verification_passed = (discrepancy == 0) and (db_persisted_count == expected_spans)
 
         # 7. Print Console Summary
         print("\n" + "-" * 75)
-        print(f"BENCHMARK RESULTS: {name}")
+        print(f"BENCHMARK RESULTS: {name} [Mode: {self.mode.upper()}]")
         print("-" * 75)
-        print(f"  Total Wall Time        : {wall_time_s:.3f} s")
+        print(f"  API Ingest Wall Time   : {api_wall_time_s:.3f} s")
+        if self.mode == "stream":
+            print(f"  Post-Enqueue Drain     : {drain_phase_duration_s:.3f} s")
+            print(f"  Total Pipeline Time    : {total_pipeline_time_s:.3f} s")
         print(f"  Completed Requests     : {total_requests}")
         print(f"  Request Throughput     : {req_throughput:.2f} req/s")
         print(f"  Telemetry Throughput   : {api_span_throughput:.2f} spans/s (API Accepted)")
@@ -334,7 +408,7 @@ class BenchmarkHarness:
         print("-" * 75)
         print(f"  DB Record Verification : Run ID = {self.run_id}")
         print(f"    Expected Spans       : {expected_spans}")
-        print(f"    API Reported Ingest  : {api_inserted_total}")
+        print(f"    API Reported Ingest  : {api_accepted_total}")
         print(f"    DB Actual Persisted  : {db_persisted_count}")
         print(f"    Discrepancy          : {discrepancy}")
         print(f"    Verification Status  : {'PASSED (Zero Discrepancy)' if verification_passed else 'FAILED'}")
@@ -343,11 +417,14 @@ class BenchmarkHarness:
         result_payload = {
             "scenario_id": scenario_id,
             "name": name,
+            "mode": self.mode,
             "spans_per_req": spans_per_req,
             "concurrency": concurrency,
             "total_requests": total_requests,
             "warmup_requests": warmup_requests,
-            "wall_time_s": round(wall_time_s, 4),
+            "wall_time_s": round(api_wall_time_s, 4),
+            "drain_time_s": round(total_pipeline_time_s, 4),
+            "post_enqueue_drain_s": round(drain_phase_duration_s, 4),
             "throughput": {
                 "requests_per_sec": round(req_throughput, 2),
                 "api_spans_per_sec": round(api_span_throughput, 2),
@@ -369,7 +446,7 @@ class BenchmarkHarness:
             },
             "db_verification": {
                 "expected_spans": expected_spans,
-                "api_inserted_count": api_inserted_total,
+                "api_inserted_count": api_accepted_total,
                 "db_persisted_count": db_persisted_count,
                 "discrepancy": discrepancy,
                 "verified": verification_passed,
@@ -386,6 +463,7 @@ class BenchmarkHarness:
 
         metadata = {
             "run_id": self.run_id,
+            "mode": self.mode,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "target_base_url": self.base_url,
             "system_metadata": {
@@ -413,13 +491,20 @@ class BenchmarkHarness:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="PulseOps Day 2 Benchmark Harness")
+    parser = argparse.ArgumentParser(description="PulseOps Telemetry Benchmark Harness")
     parser.add_argument(
         "--scenario",
         type=str,
-        default="A",
+        default="ALL",
         choices=["A", "B", "C", "D", "E", "ALL"],
-        help="Benchmark scenario to run (default: A for Checkpoint 2 dry run)",
+        help="Benchmark scenario to run (default: ALL)",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="stream",
+        choices=["direct", "stream"],
+        help="Ingestion mode: direct (PostgreSQL) or stream (Redis Streams)",
     )
     parser.add_argument(
         "--base-url",
@@ -429,20 +514,25 @@ async def main():
     )
     args = parser.parse_args()
 
-    harness = BenchmarkHarness(base_url=args.base_url)
+    harness = BenchmarkHarness(base_url=args.base_url, mode=args.mode)
 
-    # Pre-flight check
-    await harness.preflight_healthcheck()
+    try:
+        # Pre-flight check
+        await harness.preflight_healthcheck()
 
-    scenarios_to_run = ["A"] if args.scenario == "A" else (list(SCENARIOS.keys()) if args.scenario == "ALL" else [args.scenario])
-    results = []
+        scenarios_to_run = (
+            list(SCENARIOS.keys()) if args.scenario == "ALL" else [args.scenario]
+        )
+        results = []
 
-    for sc_id in scenarios_to_run:
-        res = await harness.execute_scenario(sc_id)
-        results.append(res)
+        for sc_id in scenarios_to_run:
+            res = await harness.execute_scenario(sc_id)
+            results.append(res)
 
-    artifact_path = harness.save_artifact(results)
-    print("\n[COMPLETE] Benchmark execution finished successfully.\n")
+        artifact_path = harness.save_artifact(results)
+        print("\n[COMPLETE] Benchmark execution finished successfully.\n")
+    finally:
+        await harness.close()
 
 
 if __name__ == "__main__":

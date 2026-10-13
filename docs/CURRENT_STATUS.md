@@ -1,8 +1,8 @@
 # PulseOps — Current Status
 
-**Active Phase:** Day 2: Performance Baseline & Bottleneck Profiling — **COMPLETE**  
-**Last Updated:** 2026-10-12  
-**Current Active Checkpoint:** Day 2 Completed (Checkpoints 1 - 3 Verified)
+**Active Phase:** Day 3: Decoupled Ingestion & Comparative Profiling — **COMPLETE**  
+**Last Updated:** 2026-10-13  
+**Current Active Checkpoint:** Day 3 Completed (Checkpoints 1 - 5 Verified)
 
 ---
 
@@ -53,4 +53,20 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
   - **Peak Throughput:** ~13,098 spans/sec at $p_{95} = 91.81\text{ ms}$ (concurrency 10, batch 100).
   - **Observed Boundary:** Concurrency 25 caused a 33.7% throughput drop and elongated $p_{95}$ to $611.47\text{ ms}$.
   - Full findings and artifacts recorded in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) (ADR-002) and [`backend/benchmarks/results/`](backend/benchmarks/results/).
-- [ ] **Day 3: Decoupled Ingestion Prototype** — Evaluating asynchronous stream buffering to test caller insulation under burst load.
+- [x] **Day 3: Decoupled Ingestion Prototype** — Minimal asynchronous stream slice verified end-to-end:
+  - Redis 7 Alpine with persistent volume and `--appendonly yes` added to `docker-compose.yml`.
+  - Dual-mode ingestion in `POST /v1/telemetry/spans`: `?mode=stream` returns `HTTP 202 Accepted` after appending to `telemetry:stream`.
+  - Standalone consumer worker `backend/app/worker.py` reads with `XREADGROUP`, executes batch `UNNEST` insertion in PostgreSQL transaction, and executes `XACK` only after commit.
+  - End-to-end slice verified: stream append, schema validation guard (422 without stream leak), worker processing, XACK confirmation (0 pending), and PostgreSQL trace retrieval.
+- [x] **Day 3 Checkpoint 4: Fault Injection & Correctness Verification** — 5/5 failure scenarios verified via `backend/tests/test_day3_fault_tolerance.py`:
+  - **Scenario 1 (Worker Crash Simulation):** Worker reading via `XREADGROUP` crashing pre-commit leaves message in PEL (`XPENDING` >= 1); recovery worker claims via `XAUTOCLAIM`, inserts to PostgreSQL, and calls `XACK` (`XPENDING` -> 0).
+  - **Scenario 2 (Idempotent Replay):** Duplicate replay handled gracefully with `ON CONFLICT DO NOTHING` without constraint violations or duplicate rows.
+  - **Scenario 3 (Database Outage Resilience):** Ingestion API continues returning `HTTP 202 Accepted` while PostgreSQL is down; worker handles connection drops gracefully without unhandled crashes; queued messages drained and persisted once PostgreSQL recovers.
+  - **Scenario 4 (Redis AOF Persistence):** In-flight messages in `telemetry:stream` survive container restarts (`docker compose restart redis`) with zero data loss.
+  - **Scenario 5 (Poison Pill Handling):** Malformed non-JSON messages caught, logged, and routed to `telemetry:stream:deadletter` with `XACK`, preventing head-of-line blocking and allowing subsequent valid batches to process normally.
+- [x] **Day 3 Checkpoint 5: Asynchronous Ingestion Benchmarks & Comparative Analysis** — 5-scenario benchmark matrix executed in `--mode stream`:
+  - **177,100 / 177,100 spans persisted** with 0 discrepancy and 0 data loss across all 5 scenarios.
+  - **Peak API Acceptance Throughput (Scenario D):** **14,032.42 spans/s** at $p_{50} = 63.16\text{ ms}$ and $p_{95} = 94.82\text{ ms}$ (+7.1% throughput improvement over Direct PG).
+  - **Bottleneck Isolation (Scenario E):** Identified single-process Python CPU serialization (Pydantic V2 recursive validation and JSON decoding) on the Uvicorn event loop as the primary latency gate under 25 concurrent connections, completely ruling out database connection pool checkout exhaustion and WAL disk write contention.
+  - **ADR-002 Accepted:** Transitioned from `PROPOSED` to `ACCEPTED` in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
+

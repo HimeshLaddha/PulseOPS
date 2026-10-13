@@ -12,7 +12,10 @@ def client():
 def test_health(client):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "healthy"
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["database"] == "connected"
+    assert data["redis"] == "connected"
 
 
 def test_empty_batch_rejected(client):
@@ -23,6 +26,40 @@ def test_empty_batch_rejected(client):
 def test_invalid_trace_id_path_rejected(client):
     response = client.get("/v1/traces/invalid-short-id")
     assert response.status_code == 422
+
+
+def test_stream_ingest_and_validation(client):
+    payload = {
+        "service_name": "pytest-stream-service",
+        "spans": [
+            {
+                "span_id": "aa11bb22cc33dd44",
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "parent_span_id": None,
+                "operation_name": "stream_test_op",
+                "start_time_unix_nano": 1700000000000000000,
+                "end_time_unix_nano": 1700000000050000000,
+                "status_code": "OK",
+                "attributes": {"stream": True},
+            }
+        ],
+    }
+
+    # Stream ingestion accepted
+    resp = client.post("/v1/telemetry/spans?mode=stream", json=payload)
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert "stream_id" in data
+    assert data["span_count"] == 1
+
+    # Invalid batch in stream mode rejected with 422
+    bad_payload = {
+        "service_name": "bad",
+        "spans": [{**payload["spans"][0], "trace_id": "short"}],
+    }
+    resp_bad = client.post("/v1/telemetry/spans?mode=stream", json=bad_payload)
+    assert resp_bad.status_code == 422
 
 
 def test_ingest_and_query_vertical_slice(client):

@@ -1,7 +1,6 @@
 import json
 import logging
 from typing import Any, Optional
-# pyrefly: ignore [missing-import]
 import asyncpg
 from app.config import Settings, get_settings
 from app.schemas import SpanModel
