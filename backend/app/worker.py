@@ -70,7 +70,7 @@ async def process_batch_message(
         batch = SpanBatchIngestRequest.model_validate(data)
     except Exception as exc:
         logger.error(
-            "Poison pill detected in message %s: %s. Routing to deadletter and acknowledging.",
+            "Poison pill detected in message %s: %s. Routing to deadletter.",
             msg_id,
             exc,
         )
@@ -80,13 +80,20 @@ async def process_batch_message(
                 {"original_id": msg_id, "error": str(exc), "data": str(raw_data)},
             )
         except Exception as dl_err:
-            logger.warning("Failed to write to deadletter stream: %s", dl_err)
+            logger.critical(
+                "Failed to route poison pill %s to deadletter stream: %s. Message remains un-ACKed in PEL.",
+                msg_id,
+                dl_err,
+            )
+            raise dl_err
+
+        # Acknowledge and trim from stream ONLY after DLQ write succeeds
         await redis_client.xack(stream_key, group_name, msg_id)
         await redis_client.xdel(stream_key, msg_id)
         return 0
 
     inserted = await insert_spans(pool=pool, service_name=batch.service_name, spans=batch.spans)
-    logger.debug("Persisted %d spans for service '%s' (message %s).", inserted, batch.service_name, msg_id)
+    logger.info("Persisted %d spans for service '%s' (message %s).", inserted, batch.service_name, msg_id)
 
     # Acknowledge and trim from stream ONLY after DB insertion succeeds
     await redis_client.xack(stream_key, group_name, msg_id)
@@ -96,15 +103,23 @@ async def process_batch_message(
 
 async def run_worker(
     once: bool = False,
-    batch_size: int = 10,
-    block_ms: int = 2000,
+    batch_size: int = 50,
+    block_ms: int = 1000,
     consumer_name: Optional[str] = None,
+    min_idle_ms: Optional[int] = None,
 ):
     settings = get_settings()
+    effective_min_idle_ms = (
+        min_idle_ms if min_idle_ms is not None else settings.REDIS_STREAM_MIN_IDLE_MS
+    )
     if consumer_name is None:
         consumer_name = f"worker-{uuid.uuid4().hex[:8]}"
 
-    logger.info("Starting PulseOps ingestion worker '%s'...", consumer_name)
+    logger.info(
+        "Starting PulseOps ingestion worker '%s' (reclaim_idle_ms: %d)...",
+        consumer_name,
+        effective_min_idle_ms,
+    )
 
     # Initialize PostgreSQL pool with graceful error handling
     pool = None
@@ -130,22 +145,29 @@ async def run_worker(
                         name=settings.REDIS_STREAM_KEY,
                         groupname=settings.REDIS_CONSUMER_GROUP,
                         consumername=consumer_name,
-                        min_idle_time=0,
+                        min_idle_time=effective_min_idle_ms,
                         start_id="0-0",
                         count=batch_size,
                     )
                     claimed_messages = claim_res[1] if len(claim_res) > 1 else []
                     for msg_id, fields in claimed_messages:
                         if fields:
-                            inserted = await process_batch_message(
-                                pool=pool,
-                                redis_client=redis_client,
-                                stream_key=settings.REDIS_STREAM_KEY,
-                                group_name=settings.REDIS_CONSUMER_GROUP,
-                                msg_id=msg_id,
-                                fields=fields,
-                            )
-                            total_processed += 1
+                            try:
+                                inserted = await process_batch_message(
+                                    pool=pool,
+                                    redis_client=redis_client,
+                                    stream_key=settings.REDIS_STREAM_KEY,
+                                    group_name=settings.REDIS_CONSUMER_GROUP,
+                                    msg_id=msg_id,
+                                    fields=fields,
+                                )
+                                total_processed += 1
+                            except Exception as proc_err:
+                                logger.error(
+                                    "Failed to process claimed message %s: %s. Leaving in PEL.",
+                                    msg_id,
+                                    proc_err,
+                                )
                 except Exception as claim_err:
                     logger.debug("xautoclaim encountered: %s", claim_err)
 
@@ -165,15 +187,22 @@ async def run_worker(
                 if response:
                     for stream_name, messages in response:
                         for msg_id, fields in messages:
-                            inserted = await process_batch_message(
-                                pool=pool,
-                                redis_client=redis_client,
-                                stream_key=settings.REDIS_STREAM_KEY,
-                                group_name=settings.REDIS_CONSUMER_GROUP,
-                                msg_id=msg_id,
-                                fields=fields,
-                            )
-                            total_processed += 1
+                            try:
+                                inserted = await process_batch_message(
+                                    pool=pool,
+                                    redis_client=redis_client,
+                                    stream_key=settings.REDIS_STREAM_KEY,
+                                    group_name=settings.REDIS_CONSUMER_GROUP,
+                                    msg_id=msg_id,
+                                    fields=fields,
+                                )
+                                total_processed += 1
+                            except Exception as proc_err:
+                                logger.error(
+                                    "Failed to process message %s: %s. Leaving in PEL.",
+                                    msg_id,
+                                    proc_err,
+                                )
 
                 if once:
                     logger.info("Processed %d messages in --once mode. Exiting.", total_processed)
@@ -204,6 +233,12 @@ def main():
     parser.add_argument("--batch-size", type=int, default=50, help="Number of messages to read per XREADGROUP")
     parser.add_argument("--block-ms", type=int, default=1000, help="Block timeout in ms for XREADGROUP")
     parser.add_argument("--consumer-name", type=str, default=None, help="Consumer name for consumer group")
+    parser.add_argument(
+        "--min-idle-ms",
+        type=int,
+        default=None,
+        help="Min idle time in ms for XAUTOCLAIM (default: from REDIS_STREAM_MIN_IDLE_MS)",
+    )
     args = parser.parse_args()
 
     is_once = args.once and not args.loop
@@ -213,6 +248,7 @@ def main():
             batch_size=args.batch_size,
             block_ms=args.block_ms,
             consumer_name=args.consumer_name,
+            min_idle_ms=args.min_idle_ms,
         )
     )
 

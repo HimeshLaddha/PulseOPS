@@ -74,6 +74,9 @@ Day 3 decisively proves that **Hypothesis 3 (CPU Event Loop Serialization Satura
 - Despite eliminating database writes from the request path, tail latencies at Concurrency 25 remained in the ~240 ms (p50) to ~700 ms (p95) range.
 - **Root Cause:** In Python/Uvicorn, synchronous JSON decoding, Pydantic V2 recursive model validation, and JSON re-serialization (`model_dump_json()`) across 25 concurrent connections with 100-span batches occupy the single CPU core thread, causing client requests to wait in socket backlog queues before reaching the I/O event loop.
 
+> [!NOTE]
+> While Redis Streams successfully decoupled producers from downstream storage outages and database lock contention, Scenario E latency ($p_{95} = 700.11\text{ ms}$) demonstrates that synchronous API serialization remains a performance constraint that must be addressed through multi-process worker or compiled gateway profiling.
+
 ### 3. Architectural Decision
 
 1. **Adopt Decoupled Stream Ingestion as Platform Standard:**

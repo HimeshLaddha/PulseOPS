@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_STREAM_KEY: str = "telemetry:stream"
     REDIS_CONSUMER_GROUP: str = "pulseops-ingest-group"
+    REDIS_STREAM_MIN_IDLE_MS: int = 5000
     INGESTION_MODE: str = "direct"
 
     @property

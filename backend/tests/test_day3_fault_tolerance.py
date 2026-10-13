@@ -1,10 +1,19 @@
 import asyncio
 import json
+import os
 import subprocess
+import sys
 import time
 import uuid
 import httpx
 import redis.asyncio as aioredis
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(SCRIPT_DIR)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from app.worker import process_batch_message
 
 BASE_URL = "http://127.0.0.1:8000"
 REDIS_URL = "redis://localhost:6379/0"
@@ -27,13 +36,15 @@ def exec_redis_cmd(*args: str) -> str:
     return run_docker_cmd("exec", "pulseops-redis", "redis-cli", *args)
 
 
-def run_worker_once() -> subprocess.CompletedProcess:
+def run_worker_once(*extra_args: str) -> subprocess.CompletedProcess:
+    cmd = [
+        r"c:\Users\Admin\OneDrive\Desktop\PulseOPS\backend\.venv\Scripts\python.exe",
+        r"c:\Users\Admin\OneDrive\Desktop\PulseOPS\backend\app\worker.py",
+        "--once",
+        *extra_args,
+    ]
     return subprocess.run(
-        [
-            r"c:\Users\Admin\OneDrive\Desktop\PulseOPS\backend\.venv\Scripts\python.exe",
-            r"c:\Users\Admin\OneDrive\Desktop\PulseOPS\backend\app\worker.py",
-            "--once",
-        ],
+        cmd,
         capture_output=True,
         text=True,
     )
@@ -149,8 +160,8 @@ async def main():
         print("[S1 PASS] Verified unacknowledged message in Redis PEL.")
 
         # 4. Start recovery worker pass
-        print("[S1] Launching recovery worker pass (worker.py --once)...")
-        w1_res = run_worker_once()
+        print("[S1] Launching recovery worker pass (worker.py --once --min-idle-ms 0)...")
+        w1_res = run_worker_once("--min-idle-ms", "0")
         print("[S1] Recovery Worker Output:\n", w1_res.stderr or w1_res.stdout)
         assert w1_res.returncode == 0
 
@@ -365,7 +376,171 @@ async def main():
         assert pending_final["pending"] == 0
         print("[S5 PASS] Main stream PEL has 0 unacknowledged messages.")
 
-        print_banner("ALL 5 FAULT-TOLERANCE SCENARIOS PASSED WITH ZERO ERRORS!")
+        # -----------------------------------------------------------------
+        # SCENARIO 6: DLQ Resilience Test (Simulated Failure During DLQ Write)
+        # -----------------------------------------------------------------
+        print_banner("SCENARIO 6: DLQ Resilience Test (Failure During DLQ Write)")
+        # 1. Inject a poison pill into main stream
+        s6_poison_id = await r.xadd(STREAM_KEY, {"data": "malformed-unparseable-data-xyz!{}"})
+        print(f"[S6] Injected poison pill message {s6_poison_id} into {STREAM_KEY}")
+
+        # 2. Consumer reads poison pill with XREADGROUP (putting it into PEL)
+        s6_consumer = f"dlq-worker-{uuid.uuid4().hex[:6]}"
+        s6_read = await r.xreadgroup(
+            groupname=GROUP_NAME,
+            consumername=s6_consumer,
+            streams={STREAM_KEY: ">"},
+            count=1,
+        )
+        assert s6_read, "Expected to read 1 message"
+        read_msg = s6_read[0][1][0]
+        s6_msg_id = read_msg[0]
+        s6_fields = read_msg[1]
+        assert s6_msg_id == s6_poison_id
+
+        # Verify message is currently in PEL
+        p_before = await r.xpending(STREAM_KEY, GROUP_NAME)
+        assert p_before["pending"] >= 1, "Poison pill must be in PEL"
+
+        # 3. Simulate failure during deadletter stream write using proxy
+        class FailingRedisDLQProxy:
+            """Proxy wrapping redis client that raises on deadletter XADD to simulate DLQ failure."""
+            def __init__(self, target_redis):
+                self._target = target_redis
+
+            async def xadd(self, name, fields, *args, **kwargs):
+                if "deadletter" in name:
+                    raise ConnectionError("Simulated Redis ConnectionError during DLQ write")
+                return await self._target.xadd(name, fields, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._target, name)
+
+        failing_redis = FailingRedisDLQProxy(r)
+
+        # 4. Attempt to process message with failing DLQ write
+        dlq_write_failed = False
+        try:
+            await process_batch_message(
+                pool=None,
+                redis_client=failing_redis,
+                stream_key=STREAM_KEY,
+                group_name=GROUP_NAME,
+                msg_id=s6_msg_id,
+                fields=s6_fields,
+            )
+        except ConnectionError as dl_err:
+            dlq_write_failed = True
+            print(f"[S6] Caught expected DLQ failure: {dl_err}")
+
+        assert dlq_write_failed, "Expected process_batch_message to fail when DLQ write fails"
+
+        # 5. Assert that XACK was NEVER called and message remains in XPENDING
+        p_after = await r.xpending(STREAM_KEY, GROUP_NAME)
+        print(f"[S6] XPENDING count after simulated DLQ failure: {p_after['pending']}")
+        assert p_after["pending"] >= 1, "Original message must remain in PEL when DLQ write fails!"
+
+        # Assert message is still present in main stream (not deleted)
+        s6_stream_range = await r.xrange(STREAM_KEY, min=s6_msg_id, max=s6_msg_id)
+        assert len(s6_stream_range) == 1, "Original message must NOT be deleted from stream if DLQ write fails!"
+        print("[S6 PASS] Verified message remains un-ACKed in XPENDING and undeleted from stream upon DLQ failure.")
+
+        # 6. Simulate DLQ recovery: process with healthy Redis client
+        print("[S6] Simulating DLQ recovery: processing with healthy Redis client...")
+        inserted_res = await process_batch_message(
+            pool=None,
+            redis_client=r,
+            stream_key=STREAM_KEY,
+            group_name=GROUP_NAME,
+            msg_id=s6_msg_id,
+            fields=s6_fields,
+        )
+        assert inserted_res == 0
+
+        # Verify deadletter stream received the message and PEL is now clear
+        dl_len = await r.xlen(f"{STREAM_KEY}:deadletter")
+        assert dl_len >= 1
+        p_recovered = await r.xpending(STREAM_KEY, GROUP_NAME)
+        assert p_recovered["pending"] == 0
+        print("[S6 PASS] Message successfully routed to DLQ and ACKed once DLQ recovered.")
+
+        # -----------------------------------------------------------------
+        # SCENARIO 7: Concurrent Worker Idle Window Test
+        # -----------------------------------------------------------------
+        print_banner("SCENARIO 7: Concurrent Worker Idle Window Test")
+        s7_trace_id = uuid.uuid4().hex
+        s7_span_id = uuid.uuid4().hex[:16]
+        s7_payload = {
+            "service_name": "fault-s7-idle-service",
+            "spans": [
+                {
+                    "span_id": s7_span_id,
+                    "trace_id": s7_trace_id,
+                    "parent_span_id": None,
+                    "operation_name": "s7_idle_op",
+                    "start_time_unix_nano": 1721000000000000000,
+                    "end_time_unix_nano": 1721000000050000000,
+                    "status_code": "OK",
+                    "attributes": {"scenario": 7},
+                }
+            ],
+        }
+
+        # 1. Ingest batch via stream
+        resp_s7 = client.post("/v1/telemetry/spans?mode=stream", json=s7_payload)
+        assert resp_s7.status_code == 202
+        s7_stream_id = resp_s7.json()["stream_id"]
+        print(f"[S7] Ingested message {s7_stream_id}")
+
+        # 2. Worker A reads the message with XREADGROUP (putting it in PEL under worker-A)
+        consumer_a = f"worker-A-{uuid.uuid4().hex[:4]}"
+        read_a = await r.xreadgroup(
+            groupname=GROUP_NAME,
+            consumername=consumer_a,
+            streams={STREAM_KEY: ">"},
+            count=1,
+        )
+        assert read_a, "Worker A should have read 1 message"
+        print(f"[S7] Worker A ('{consumer_a}') read message '{s7_stream_id}'. Message idle time is ~0ms.")
+
+        # 3. Worker B attempts to reclaim with min_idle_time = 10000 ms (10 seconds)
+        consumer_b = f"worker-B-{uuid.uuid4().hex[:4]}"
+        claim_attempt_1 = await r.xautoclaim(
+            name=STREAM_KEY,
+            groupname=GROUP_NAME,
+            consumername=consumer_b,
+            min_idle_time=10000,
+            start_id="0-0",
+            count=10,
+        )
+        claimed_messages_1 = claim_attempt_1[1] if len(claim_attempt_1) > 1 else []
+        print(f"[S7] Worker B claim attempt with min_idle_time=10000ms claimed: {len(claimed_messages_1)} messages")
+        assert len(claimed_messages_1) == 0, "Worker B must NOT claim message whose idle time is < 10000ms!"
+
+        # Also test with CLI worker using default 5000ms idle window
+        w_b_res = run_worker_once("--consumer-name", consumer_b, "--min-idle-ms", "5000")
+        assert w_b_res.returncode == 0
+        # Trace should NOT be in PostgreSQL yet because it was not claimed
+        resp_s7_check = client.get(f"/v1/traces/{s7_trace_id}")
+        assert resp_s7_check.status_code == 404, "Trace must NOT be persisted by Worker B before idle window expires!"
+        print("[S7 PASS] Confirmed: Active message (idle < min_idle_ms) is protected from premature reclamation.")
+
+        # 4. Now Worker B reclaims with min_idle_time = 0ms (simulating expired idle window)
+        print("[S7] Worker B reclaiming with min_idle_ms = 0 (simulating expired idle window)...")
+        w_b_reclaim = run_worker_once("--consumer-name", consumer_b, "--min-idle-ms", "0")
+        assert w_b_reclaim.returncode == 0
+
+        # Verify trace is now persisted in PostgreSQL
+        resp_s7_persisted = client.get(f"/v1/traces/{s7_trace_id}")
+        assert resp_s7_persisted.status_code == 200
+        assert resp_s7_persisted.json()["span_count"] == 1
+
+        # Verify PEL is 0
+        p_s7_final = await r.xpending(STREAM_KEY, GROUP_NAME)
+        assert p_s7_final["pending"] == 0
+        print("[S7 PASS] Message successfully reclaimed and persisted after idle window satisfied.")
+
+        print_banner("ALL 7 FAULT-TOLERANCE SCENARIOS PASSED WITH ZERO ERRORS!")
 
     finally:
         await r.aclose()
