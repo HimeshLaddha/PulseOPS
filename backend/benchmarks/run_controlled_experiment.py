@@ -94,11 +94,22 @@ async def run_workload_run(
         await client.post("/v1/telemetry/profiling/reset")
 
     r_clean = aioredis.from_url(settings.redis_url, decode_responses=True)
-    await r_clean.delete(settings.REDIS_STREAM_KEY, f"{settings.REDIS_STREAM_KEY}:deadletter")
+    # Clear the test stream before each run (XTRIM telemetry:stream MAXLEN 0)
+    try:
+        await r_clean.xtrim(settings.REDIS_STREAM_KEY, maxlen=0)
+    except Exception:
+        pass
+    try:
+        await r_clean.delete(f"{settings.REDIS_STREAM_KEY}:deadletter")
+    except Exception:
+        pass
     try:
         await r_clean.xgroup_create(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, id="0", mkstream=True)
     except Exception:
-        pass
+        try:
+            await r_clean.xgroup_setid(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, id="0")
+        except Exception:
+            pass
     await r_clean.aclose()
 
     pg_clean = await asyncpg.connect(settings.database_url)
@@ -294,7 +305,17 @@ async def run_workload_run(
 
     # Aggregate worker stage metrics across all active workers
     agg_stages: Dict[str, Any] = {}
-    for stage_key in ["t_fetch", "t_parse", "t_db", "t_ack", "t_3a_pool_acquire", "t_3b_sql_execute", "t_3c_wal_commit"]:
+    for stage_key in [
+        "t_fetch",
+        "t_parse",
+        "t_db",
+        "t_ack",
+        "t_3a_pool_acquire",
+        "t_3b_sql_fetch_execute",
+        "t_3b_sql_execute",
+        "t_3c_transaction_commit",
+        "t_3c_wal_commit",
+    ]:
         total_count = sum(w.get(stage_key, {}).get("count", 0) for w in worker_results.values())
         if total_count > 0:
             weighted_mean = sum(w.get(stage_key, {}).get("mean_ms", 0.0) * w.get(stage_key, {}).get("count", 0) for w in worker_results.values()) / total_count
@@ -310,6 +331,19 @@ async def run_workload_run(
                 "p99_ms": avg_p99,
                 "max_ms": max_v,
             }
+
+    # Workload balance per worker
+    workload_balance: Dict[str, Any] = {}
+    for w_name in worker_names:
+        w_data = worker_results.get(w_name, {})
+        batches = w_data.get("messages_processed", 0)
+        spans = w_data.get("spans_persisted", 0)
+        share_pct = (spans / total_spans_persisted * 100.0) if total_spans_persisted > 0 else 0.0
+        workload_balance[w_name] = {
+            "batches": batches,
+            "spans": spans,
+            "share_pct": round(share_pct, 2),
+        }
 
     result_summary = {
         "run_name": run_name,
@@ -331,6 +365,7 @@ async def run_workload_run(
         },
         "gateway_metrics": gw_metrics,
         "worker_metrics": worker_results,
+        "workload_balance": workload_balance,
         "aggregate_worker_metrics": agg_stages,
         "queue_progression": queue_samples,
     }
@@ -338,13 +373,14 @@ async def run_workload_run(
     print(f"\n[VERIFIED] Run '{run_name}': {verified_db_count:,} / {expected_spans:,} spans in PostgreSQL (0 duplicates).")
     print(f"  Worker Active Drain Time : {worker_active_drain_time:.3f} s ({worker_active_throughput:.1f} spans/s)")
     print(f"  Total End-to-End Time   : {total_e2e_drain_time:.3f} s ({e2e_throughput:.1f} spans/s)")
+    print(f"  Workload Balance         : {workload_balance}")
 
     return result_summary
 
 
 async def main():
     print("=" * 80)
-    print("MISSION: PulseOps — Day 4 Checkpoint 3: Fine-Grained DB Profiling & Worker Concurrency Experiment")
+    print("MISSION: PulseOps — Day 5: 1 -> 2 -> 4 Worker Scaling Experiment")
     print("=" * 80)
 
     # Run 1: Single Worker Baseline
@@ -367,50 +403,132 @@ async def main():
         concurrency=10,
     )
 
-    # Save consolidated experiment comparison
-    comparison_file = os.path.join(RESULTS_DIR, "day4_checkpoint3_experiment.json")
+    time.sleep(2.0)
+
+    # Run 3: Quad Concurrent Workers
+    run3 = await run_workload_run(
+        run_name="Run 3 (Quad Workers)",
+        worker_names=["worker-1", "worker-2", "worker-3", "worker-4"],
+        total_requests=500,
+        spans_per_req=100,
+        concurrency=10,
+    )
+
+    # Compute scaling metrics
+    tp1 = run1["worker_active_throughput_spans_s"]
+    tp2 = run2["worker_active_throughput_spans_s"]
+    tp3 = run3["worker_active_throughput_spans_s"]
+
+    d1 = run1["worker_active_drain_s"]
+    d2 = run2["worker_active_drain_s"]
+    d3 = run3["worker_active_drain_s"]
+
+    delta_tp_1_to_2 = ((tp2 - tp1) / tp1 * 100.0) if tp1 > 0 else 0.0
+    delta_tp_2_to_4 = ((tp3 - tp2) / tp2 * 100.0) if tp2 > 0 else 0.0
+    delta_tp_1_to_4 = ((tp3 - tp1) / tp1 * 100.0) if tp1 > 0 else 0.0
+
+    delta_d_1_to_2 = ((d1 - d2) / d1 * 100.0) if d1 > 0 else 0.0
+    delta_d_2_to_4 = ((d2 - d3) / d2 * 100.0) if d2 > 0 else 0.0
+    delta_d_1_to_4 = ((d1 - d3) / d1 * 100.0) if d1 > 0 else 0.0
+
+    scaling_summary = {
+        "throughput_delta_1_to_2_pct": round(delta_tp_1_to_2, 2),
+        "throughput_delta_2_to_4_pct": round(delta_tp_2_to_4, 2),
+        "throughput_delta_1_to_4_pct": round(delta_tp_1_to_4, 2),
+        "drain_time_reduction_1_to_2_pct": round(delta_d_1_to_2, 2),
+        "drain_time_reduction_2_to_4_pct": round(delta_d_2_to_4, 2),
+        "drain_time_reduction_1_to_4_pct": round(delta_d_1_to_4, 2),
+    }
+
+    # Save Day 5 raw results
+    comparison_file = os.path.join(RESULTS_DIR, "day5_worker_scaling_experiment.json")
     with open(comparison_file, "w", encoding="utf-8") as f:
-        json.dump({"run1_single_worker": run1, "run2_dual_workers": run2}, f, indent=2)
+        json.dump(
+            {
+                "metadata": {
+                    "experiment": "Day 5: 1 -> 2 -> 4 Worker Scaling Experiment",
+                    "workload": "500 requests x 100 spans = 50,000 spans",
+                    "concurrency": 10,
+                    "spans_per_request": 100,
+                    "total_requests": 500,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                "run1_single_worker": run1,
+                "run2_dual_workers": run2,
+                "run3_quad_workers": run3,
+                "scaling_summary": scaling_summary,
+            },
+            f,
+            indent=2,
+        )
 
-    # Print Comparative Presentation Table
-    print("\n" + "=" * 80)
-    print("COMPARATIVE RESULTS: SINGLE WORKER VS. DUAL CONCURRENT WORKERS")
-    print("=" * 80)
-
-    print(f"{'Metric':<36} | {'Run 1: Single Worker':<18} | {'Run 2: Dual Workers':<18} | {'Delta / Scaling':<15}")
-    print("-" * 80)
-    print(f"{'Active Consumer Workers':<36} | {'1 worker':<18} | {'2 workers':<18} | {'2x Concurrency':<15}")
-    print(f"{'Total Spans Ingested':<36} | {run1['verified_db_spans']:<18,} | {run2['verified_db_spans']:<18,} | {'100% verified':<15}")
-    print(f"{'Database Duplicates / Discrepancies':<36} | {run1['duplicate_spans']:<18} | {run2['duplicate_spans']:<18} | {'Zero Loss/Dup':<15}")
-    print(f"{'API Wall Time (Enqueuing)':<36} | {run1['api_wall_time_s']:<18.3f} s | {run2['api_wall_time_s']:<18.3f} s | —")
-    print(f"{'Worker Active Drain Time':<36} | {run1['worker_active_drain_s']:<18.3f} s | {run2['worker_active_drain_s']:<18.3f} s | {((run1['worker_active_drain_s'] - run2['worker_active_drain_s']) / run1['worker_active_drain_s'] * 100):+.1f}% time")
-    print(f"{'Total End-to-End Drain Time':<36} | {run1['total_e2e_drain_s']:<18.3f} s | {run2['total_e2e_drain_s']:<18.3f} s | {((run1['total_e2e_drain_s'] - run2['total_e2e_drain_s']) / run1['total_e2e_drain_s'] * 100):+.1f}% time")
-    print(f"{'Worker Active Throughput':<36} | {run1['worker_active_throughput_spans_s']:<18.1f} spans/s | {run2['worker_active_throughput_spans_s']:<18.1f} spans/s | {((run2['worker_active_throughput_spans_s'] - run1['worker_active_throughput_spans_s']) / run1['worker_active_throughput_spans_s'] * 100):+.1f}% throughput")
-    print(f"{'End-to-End Pipeline Throughput':<36} | {run1['e2e_throughput_spans_s']:<18.1f} spans/s | {run2['e2e_throughput_spans_s']:<18.1f} spans/s | {((run2['e2e_throughput_spans_s'] - run1['e2e_throughput_spans_s']) / run1['e2e_throughput_spans_s'] * 100):+.1f}% throughput")
-
-    print("\n" + "=" * 80)
-    print("FINE-GRAINED DATABASE STAGE DISTRIBUTION (PER-BATCH TIMINGS)")
-    print("=" * 80)
-
-    # Extract timings from worker metrics
+    # Helper to extract stage stats
     def get_w_stats(run_dict, stage_key):
         agg = run_dict.get("aggregate_worker_metrics", {}).get(stage_key)
         if agg and agg.get("count", 0) > 0:
-            return f"{agg['mean_ms']:.2f} ms (p50: {agg['p50_ms']:.2f}, p95: {agg['p95_ms']:.2f})"
+            return f"{agg['mean_ms']:.2f} ms (p95: {agg['p95_ms']:.2f})"
         return "N/A"
 
-    print(f"{'Stage / Component':<36} | {'Run 1: Single Worker':<22} | {'Run 2: Dual Workers':<22}")
-    print("-" * 80)
-    print(f"{'T3a: Pool Acquisition':<36} | {get_w_stats(run1, 't_3a_pool_acquire'):<22} | {get_w_stats(run2, 't_3a_pool_acquire'):<22}")
-    print(f"{'T3b: SQL UNNEST Execution':<36} | {get_w_stats(run1, 't_3b_sql_execute'):<22} | {get_w_stats(run2, 't_3b_sql_execute'):<22}")
-    print(f"{'T3c: WAL Commit (fsync phase)':<36} | {get_w_stats(run1, 't_3c_wal_commit'):<22} | {get_w_stats(run2, 't_3c_wal_commit'):<22}")
-    print(f"{'T3: Total DB Persistence':<36} | {get_w_stats(run1, 't_db'):<22} | {get_w_stats(run2, 't_db'):<22}")
-    print(f"{'T2: In-Memory Parse (Pydantic)':<36} | {get_w_stats(run1, 't_parse'):<22} | {get_w_stats(run2, 't_parse'):<22}")
-    print(f"{'T4: Redis Ack/Del (XACK+XDEL)':<36} | {get_w_stats(run1, 't_ack'):<22} | {get_w_stats(run2, 't_ack'):<22}")
+    def get_w_mean(run_dict, stage_key):
+        agg = run_dict.get("aggregate_worker_metrics", {}).get(stage_key)
+        if agg and agg.get("count", 0) > 0:
+            return f"{agg['mean_ms']:.2f} ms"
+        return "N/A"
 
-    print("\n" + "=" * 80)
+    # Print 3-Way Scaling Comparison Table
+    print("\n" + "=" * 96)
+    print("DAY 5 CONTROLLED EXPERIMENT: 1 -> 2 -> 4 WORKER SCALING COMPARISON")
+    print("=" * 96)
+    print(f"{'Metric':<34} | {'Run 1: 1 Worker':<16} | {'Run 2: 2 Workers':<16} | {'Run 3: 4 Workers':<16}")
+    print("-" * 96)
+    print(f"{'Active Consumer Workers':<34} | {'1 worker':<16} | {'2 workers':<16} | {'4 workers':<16}")
+    print(f"{'Total Spans Ingested':<34} | {run1['verified_db_spans']:<16,} | {run2['verified_db_spans']:<16,} | {run3['verified_db_spans']:<16,}")
+    print(f"{'Database Discrepancies / Dups':<34} | {run1['duplicate_spans']:<16} | {run2['duplicate_spans']:<16} | {run3['duplicate_spans']:<16}")
+    print(f"{'API Wall Time (Enqueuing)':<34} | {run1['api_wall_time_s']:<16.3f} s | {run2['api_wall_time_s']:<16.3f} s | {run3['api_wall_time_s']:<16.3f} s")
+    print(f"{'API Ingestion Latency (p50)':<34} | {run1['client_latencies_ms']['p50']:<16.2f} ms | {run2['client_latencies_ms']['p50']:<16.2f} ms | {run3['client_latencies_ms']['p50']:<16.2f} ms")
+    print(f"{'API Ingestion Latency (p95)':<34} | {run1['client_latencies_ms']['p95']:<16.2f} ms | {run2['client_latencies_ms']['p95']:<16.2f} ms | {run3['client_latencies_ms']['p95']:<16.2f} ms")
+    print(f"{'API Ingestion Latency (p99)':<34} | {run1['client_latencies_ms']['p99']:<16.2f} ms | {run2['client_latencies_ms']['p99']:<16.2f} ms | {run3['client_latencies_ms']['p99']:<16.2f} ms")
+    print("-" * 96)
+    print(f"{'Worker Active Drain Time':<34} | {run1['worker_active_drain_s']:<16.3f} s | {run2['worker_active_drain_s']:<16.3f} s | {run3['worker_active_drain_s']:<16.3f} s")
+    print(f"{'Total End-to-End Drain Time':<34} | {run1['total_e2e_drain_s']:<16.3f} s | {run2['total_e2e_drain_s']:<16.3f} s | {run3['total_e2e_drain_s']:<16.3f} s")
+    print(f"{'Worker Active Throughput':<34} | {run1['worker_active_throughput_spans_s']:<16.1f} s/s | {run2['worker_active_throughput_spans_s']:<16.1f} s/s | {run3['worker_active_throughput_spans_s']:<16.1f} s/s")
+    print(f"{'End-to-End Throughput':<34} | {run1['e2e_throughput_spans_s']:<16.1f} s/s | {run2['e2e_throughput_spans_s']:<16.1f} s/s | {run3['e2e_throughput_spans_s']:<16.1f} s/s")
+
+    print("\n" + "=" * 96)
+    print("SCALING EFFICIENCY & SPEEDUP ANALYSIS")
+    print("=" * 96)
+    print(f"{'Transition':<24} | {'Throughput Delta':<20} | {'Drain Time Reduction':<22} | {'Scaling Efficiency':<20}")
+    print("-" * 96)
+    eff_1_to_2 = (delta_tp_1_to_2 / 100.0) * 100.0  # ideal is 100% boost for 2x workers
+    eff_2_to_4 = (delta_tp_2_to_4 / 100.0) * 100.0  # ideal is 100% boost for 2x workers
+    eff_1_to_4 = (delta_tp_1_to_4 / 300.0) * 100.0  # ideal is 300% boost for 4x workers
+    print(f"{'1 -> 2 Workers':<24} | {delta_tp_1_to_2:+6.1f}% throughput    | {delta_d_1_to_2:6.1f}% time reduction   | {eff_1_to_2:5.1f}% of linear ideal")
+    print(f"{'2 -> 4 Workers':<24} | {delta_tp_2_to_4:+6.1f}% throughput    | {delta_d_2_to_4:6.1f}% time reduction   | {eff_2_to_4:5.1f}% of linear ideal")
+    print(f"{'1 -> 4 Workers (Overall)':<24} | {delta_tp_1_to_4:+6.1f}% throughput    | {delta_d_1_to_4:6.1f}% time reduction   | {eff_1_to_4:5.1f}% of linear ideal")
+
+    print("\n" + "=" * 96)
+    print("FINE-GRAINED DATABASE STAGE DISTRIBUTION (PER-BATCH TIMINGS: MEAN & P95)")
+    print("=" * 96)
+    print(f"{'Stage / Component':<34} | {'Run 1: 1 Worker':<18} | {'Run 2: 2 Workers':<18} | {'Run 3: 4 Workers':<18}")
+    print("-" * 96)
+    print(f"{'T3a: Pool Acquisition':<34} | {get_w_stats(run1, 't_3a_pool_acquire'):<18} | {get_w_stats(run2, 't_3a_pool_acquire'):<18} | {get_w_stats(run3, 't_3a_pool_acquire'):<18}")
+    print(f"{'T3b: SQL Fetch/Execute Duration':<34} | {get_w_stats(run1, 't_3b_sql_fetch_execute'):<18} | {get_w_stats(run2, 't_3b_sql_fetch_execute'):<18} | {get_w_stats(run3, 't_3b_sql_fetch_execute'):<18}")
+    print(f"{'T3c: Transaction Commit Duration':<34} | {get_w_stats(run1, 't_3c_transaction_commit'):<18} | {get_w_stats(run2, 't_3c_transaction_commit'):<18} | {get_w_stats(run3, 't_3c_transaction_commit'):<18}")
+    print(f"{'T3: Total DB Persistence':<34} | {get_w_stats(run1, 't_db'):<18} | {get_w_stats(run2, 't_db'):<18} | {get_w_stats(run3, 't_db'):<18}")
+    print(f"{'T2: In-Memory Parse (Pydantic)':<34} | {get_w_stats(run1, 't_parse'):<18} | {get_w_stats(run2, 't_parse'):<18} | {get_w_stats(run3, 't_parse'):<18}")
+    print(f"{'T4: Redis Ack/Del (XACK+XDEL)':<34} | {get_w_stats(run1, 't_ack'):<18} | {get_w_stats(run2, 't_ack'):<18} | {get_w_stats(run3, 't_ack'):<18}")
+
+    print("\n" + "=" * 96)
+    print("WORKLOAD BALANCE DISTRIBUTION ACROSS CONSUMER WORKERS")
+    print("=" * 96)
+    for run_obj in [run1, run2, run3]:
+        print(f"[{run_obj['run_name']}] (Total: {run_obj['verified_db_spans']:,} spans across {run_obj['total_requests']} batches)")
+        for w_k, w_v in run_obj.get("workload_balance", {}).items():
+            print(f"  • {w_k:<16}: {w_v['batches']:>3} batches ({w_v['spans']:>6,} spans, {w_v['share_pct']:>5.1f}% share)")
+
+    print("\n" + "=" * 96)
     print(f"Results saved to {comparison_file}")
-    print("=" * 80)
+    print("=" * 96)
 
 
 if __name__ == "__main__":

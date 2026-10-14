@@ -102,7 +102,9 @@ class WorkerProfilingTracker:
             "t_db": stats(self.db_times),
             "t_ack": stats(self.ack_times),
             "t_3a_pool_acquire": stats(self.t_3a_times),
+            "t_3b_sql_fetch_execute": stats(self.t_3b_times),
             "t_3b_sql_execute": stats(self.t_3b_times),
+            "t_3c_transaction_commit": stats(self.t_3c_times),
             "t_3c_wal_commit": stats(self.t_3c_times),
         }
 
@@ -131,19 +133,19 @@ class WorkerProfilingTracker:
         print(f"Worker Batch Throughput:  {s['messages_per_sec']:.2f} batches/s")
         print(f"Worker Span Throughput:   {s['spans_per_sec']:.2f} spans/s")
         print("-" * 80)
-        print(f"{'Stage':<28} | {'Mean (ms)':<10} | {'p50 (ms)':<10} | {'p95 (ms)':<10} | {'p99 (ms)':<10} | {'Max (ms)':<10}")
+        print(f"{'Stage':<34} | {'Mean (ms)':<10} | {'p50 (ms)':<10} | {'p95 (ms)':<10} | {'p99 (ms)':<10} | {'Max (ms)':<10}")
         print("-" * 80)
         for stage, key in [
             ("T1: Fetch (Redis)", "t_fetch"),
             ("T2: Parse (JSON/Model)", "t_parse"),
             ("T3: DB Total", "t_db"),
-            ("  T3a: Pool Acquire", "t_3a_pool_acquire"),
-            ("  T3b: SQL Execution", "t_3b_sql_execute"),
-            ("  T3c: WAL Commit (fsync)", "t_3c_wal_commit"),
+            ("  T3a: Pool Acquisition", "t_3a_pool_acquire"),
+            ("  T3b: SQL Fetch/Execute Duration", "t_3b_sql_fetch_execute"),
+            ("  T3c: Transaction Commit Duration", "t_3c_transaction_commit"),
             ("T4: Ack/Del (Redis)", "t_ack"),
         ]:
             st = s[key]
-            print(f"{stage:<28} | {st['mean_ms']:<10.2f} | {st['p50_ms']:<10.2f} | {st['p95_ms']:<10.2f} | {st['p99_ms']:<10.2f} | {st['max_ms']:<10.2f}")
+            print(f"{stage:<34} | {st['mean_ms']:<10.2f} | {st['p50_ms']:<10.2f} | {st['p95_ms']:<10.2f} | {st['p99_ms']:<10.2f} | {st['max_ms']:<10.2f}")
         print("=" * 80 + "\n")
 
 
@@ -290,6 +292,19 @@ async def run_worker(
     consumer_name: Optional[str] = None,
     min_idle_ms: Optional[int] = None,
 ):
+    """
+    Run the telemetry consumer worker loop.
+
+    :param once: If True, process available messages and exit.
+    :param batch_size: Number of messages to read per XREADGROUP/XAUTOCLAIM.
+    :param block_ms: Block timeout in ms for XREADGROUP when stream is empty.
+    :param consumer_name: Unique consumer identifier in consumer group.
+    :param min_idle_ms: Minimum idle threshold (in ms) before an unacknowledged message in PEL
+        becomes eligible for reclaim via XAUTOCLAIM. Note: This is an idle threshold, not a guaranteed
+        lease. If a worker takes longer than min_idle_ms to process a batch, another worker may reclaim
+        the message, potentially causing duplicate delivery. Downstream PostgreSQL writes handle this
+        safely via ON CONFLICT DO NOTHING idempotency.
+    """
     settings = get_settings()
     effective_min_idle_ms = (
         min_idle_ms if min_idle_ms is not None else settings.REDIS_STREAM_MIN_IDLE_MS
@@ -485,7 +500,7 @@ def main():
         "--min-idle-ms",
         type=int,
         default=None,
-        help="Min idle time in ms for XAUTOCLAIM (default: from REDIS_STREAM_MIN_IDLE_MS)",
+        help="Min idle threshold in ms before unacknowledged messages are eligible for reclaim via XAUTOCLAIM (default: from REDIS_STREAM_MIN_IDLE_MS)",
     )
     args = parser.parse_args()
 

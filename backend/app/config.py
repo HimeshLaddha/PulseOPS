@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_STREAM_KEY: str = "telemetry:stream"
     REDIS_CONSUMER_GROUP: str = "pulseops-ingest-group"
-    REDIS_STREAM_MIN_IDLE_MS: int = 5000
+    REDIS_STREAM_MIN_IDLE_MS: int = 5000  # Minimum idle threshold (ms) before unacknowledged messages become eligible for reclaim via XAUTOCLAIM. Not a guaranteed lease; workers exceeding this threshold may trigger concurrent reclaim, handled safely via idempotent PostgreSQL writes.
     INGESTION_MODE: str = "direct"
 
     @property
