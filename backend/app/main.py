@@ -1,10 +1,14 @@
+import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal, Optional
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Path, Query, status
+from fastapi import FastAPI, HTTPException, Path, Query, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.config import get_settings
 from app.db import close_db_pool, get_db_pool, get_spans_by_trace, init_db_pool, insert_spans
@@ -23,6 +27,49 @@ logging.basicConfig(
 logger = logging.getLogger("pulseops.api")
 
 _redis_client: Optional[aioredis.Redis] = None
+
+
+class GatewayProfilingMetrics:
+    def __init__(self):
+        self.parse_times: list[float] = []
+        self.serialize_times: list[float] = []
+        self.redis_times: list[float] = []
+
+    def record(self, t_parse: float, t_serialize: float, t_redis: float):
+        self.parse_times.append(t_parse)
+        self.serialize_times.append(t_serialize)
+        self.redis_times.append(t_redis)
+
+    def reset(self):
+        self.parse_times.clear()
+        self.serialize_times.clear()
+        self.redis_times.clear()
+
+    def get_summary(self) -> dict:
+        def stats(arr):
+            if not arr:
+                return {"count": 0, "min_ms": 0.0, "mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0}
+            s = sorted(arr)
+            n = len(s)
+            return {
+                "count": n,
+                "min_ms": s[0] * 1000.0,
+                "mean_ms": (sum(s) / n) * 1000.0,
+                "p50_ms": s[int(n * 0.50)] * 1000.0,
+                "p95_ms": s[min(int(n * 0.95), n - 1)] * 1000.0,
+                "p99_ms": s[min(int(n * 0.99), n - 1)] * 1000.0,
+                "max_ms": s[-1] * 1000.0,
+            }
+
+        return {
+            "total_requests": len(self.parse_times),
+            "t_api_parse": stats(self.parse_times),
+            "t_api_serialize": stats(self.serialize_times),
+            "t_api_redis_xadd": stats(self.redis_times),
+        }
+
+
+gateway_profiler = GatewayProfilingMetrics()
 
 
 def get_redis_client() -> aioredis.Redis:
@@ -120,7 +167,7 @@ async def health_check():
     summary="Ingest a batch of telemetry spans",
 )
 async def ingest_spans(
-    request: SpanBatchIngestRequest,
+    raw_request: Request,
     mode: Annotated[
         Optional[Literal["direct", "stream"]],
         Query(description="Ingestion mode: direct (PostgreSQL) or stream (Redis Streams)"),
@@ -135,14 +182,36 @@ async def ingest_spans(
     settings = get_settings()
     effective_mode = mode or settings.INGESTION_MODE
 
+    # 1. Measure T_api_parse: Read raw body bytes + Pydantic V2 JSON deserialization & validation
+    body_bytes = await raw_request.body()
+    t_parse_start = time.perf_counter()
+    try:
+        request = SpanBatchIngestRequest.model_validate_json(body_bytes)
+    except ValidationError as ve:
+        raise RequestValidationError(ve.errors()) from ve
+    except Exception as je:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {str(je)}") from je
+    t_api_parse = time.perf_counter() - t_parse_start
+
     if effective_mode == "stream":
+        t_ser_start = time.perf_counter()
+        payload_json = request.model_dump_json()
+        t_api_serialize = time.perf_counter() - t_ser_start
+
+        t_redis_start = time.perf_counter()
         try:
             redis = get_redis_client()
-            payload_json = request.model_dump_json()
             stream_id = await redis.xadd(
                 settings.REDIS_STREAM_KEY,
                 {"data": payload_json},
             )
+            t_api_redis_xadd = time.perf_counter() - t_redis_start
+            gateway_profiler.record(
+                t_parse=t_api_parse,
+                t_serialize=t_api_serialize,
+                t_redis=t_api_redis_xadd,
+            )
+
             return JSONResponse(
                 status_code=status.HTTP_202_ACCEPTED,
                 content={
@@ -176,6 +245,19 @@ async def ingest_spans(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to persist span batch: {str(exc)}",
         ) from exc
+
+
+@app.get("/v1/telemetry/profiling/gateway-metrics", tags=["Telemetry"])
+async def get_gateway_profiling_metrics():
+    summary = gateway_profiler.get_summary()
+    logger.info("[GATEWAY PROFILER] %s", summary)
+    return summary
+
+
+@app.post("/v1/telemetry/profiling/reset", tags=["Telemetry"])
+async def reset_gateway_profiling_metrics():
+    gateway_profiler.reset()
+    return {"status": "reset"}
 
 
 @app.get(

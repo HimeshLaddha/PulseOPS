@@ -540,7 +540,113 @@ async def main():
         assert p_s7_final["pending"] == 0
         print("[S7 PASS] Message successfully reclaimed and persisted after idle window satisfied.")
 
-        print_banner("ALL 7 FAULT-TOLERANCE SCENARIOS PASSED WITH ZERO ERRORS!")
+        # -----------------------------------------------------------------
+        # SCENARIO 8: DLQ Duplicate Delivery Safety (Un-ACKed Poison Pill Processed Twice)
+        # -----------------------------------------------------------------
+        print_banner("SCENARIO 8: DLQ Duplicate Delivery Safety (Un-ACKed Poison Pill Reprocessed)")
+        # 1. Inject a poison pill message into the stream
+        s8_poison_id = await r.xadd(STREAM_KEY, {"data": "malformed-json-test-duplicate-dlq{{{!!!"})
+        print(f"[S8] Injected poison pill message {s8_poison_id} into {STREAM_KEY}")
+
+        # 2. Worker reads the poison pill into PEL via XREADGROUP
+        s8_consumer = f"poison-worker-{uuid.uuid4().hex[:6]}"
+        s8_read = await r.xreadgroup(
+            groupname=GROUP_NAME,
+            consumername=s8_consumer,
+            streams={STREAM_KEY: ">"},
+            count=1,
+        )
+        assert s8_read, "Expected to read 1 poison pill message"
+        s8_read_id = s8_read[0][1][0][0]
+        s8_fields = s8_read[0][1][0][1]
+        assert s8_read_id == s8_poison_id
+
+        # 3. Simulate first attempt: Worker routes poison pill to DLQ, but crashes immediately BEFORE XACK/XDEL
+        print("[S8] Attempt 1: Routing to DLQ but simulating crash before XACK/XDEL...")
+        await r.xadd(
+            f"{STREAM_KEY}:deadletter",
+            {"original_id": s8_poison_id, "error": "Simulated pre-ACK crash", "data": str(s8_fields.get("data"))},
+        )
+        # Poison pill is now in DLQ, but still un-ACKed in PEL!
+        p_s8_before = await r.xpending(STREAM_KEY, GROUP_NAME)
+        assert p_s8_before["pending"] >= 1, "Poison pill must remain pending in PEL before attempt 2"
+
+        # 4. Attempt 2: Recovery worker pass re-processes the un-ACKed poison pill
+        print("[S8] Attempt 2: Recovery worker reclaiming and re-processing un-ACKed poison pill...")
+        w8_res = run_worker_once("--min-idle-ms", "0")
+        print("[S8] Worker Replay Output:\n", w8_res.stderr or w8_res.stdout)
+        assert w8_res.returncode == 0, f"Worker crashed on duplicate delivery! stderr: {w8_res.stderr}"
+        assert "Poison pill detected" in (w8_res.stderr or w8_res.stdout)
+
+        # 5. Assert PEL is cleared and pipeline remains fully operational
+        p_s8_after = await r.xpending(STREAM_KEY, GROUP_NAME)
+        assert p_s8_after["pending"] == 0, f"Expected 0 pending in PEL, got {p_s8_after['pending']}"
+
+        # 6. Verify pipeline processes subsequent valid message without any issue
+        s8_valid_trace_id = uuid.uuid4().hex
+        s8_valid_payload = {
+            "service_name": "fault-s8-subsequent",
+            "spans": [
+                {
+                    "span_id": uuid.uuid4().hex[:16],
+                    "trace_id": s8_valid_trace_id,
+                    "parent_span_id": None,
+                    "operation_name": "s8_subsequent_op",
+                    "start_time_unix_nano": 1721000000000000000,
+                    "end_time_unix_nano": 1721000000030000000,
+                    "status_code": "OK",
+                    "attributes": {"after_s8": True},
+                }
+            ],
+        }
+        resp_s8 = client.post("/v1/telemetry/spans?mode=stream", json=s8_valid_payload)
+        assert resp_s8.status_code == 202
+        run_worker_once()
+        resp_s8_check = client.get(f"/v1/traces/{s8_valid_trace_id}")
+        assert resp_s8_check.status_code == 200
+        assert resp_s8_check.json()["span_count"] == 1
+        print("[S8 PASS] DLQ duplicate delivery safely processed without crashing and cleared PEL.")
+
+        # -----------------------------------------------------------------
+        # SCENARIO 9: XAUTOCLAIM Nil / Deleted Message Handling
+        # -----------------------------------------------------------------
+        print_banner("SCENARIO 9: XAUTOCLAIM Nil / Deleted Message Handling")
+        # 1. Add a temporary message to the stream
+        s9_msg_id = await r.xadd(STREAM_KEY, {"data": "temporary-message-to-be-deleted"})
+        print(f"[S9] Injected temporary message {s9_msg_id}")
+
+        # 2. Read it into PEL with a consumer
+        s9_consumer = f"phantom-consumer-{uuid.uuid4().hex[:6]}"
+        s9_read = await r.xreadgroup(
+            groupname=GROUP_NAME,
+            consumername=s9_consumer,
+            streams={STREAM_KEY: ">"},
+            count=1,
+        )
+        assert s9_read, "Expected to read temporary message into PEL"
+        assert s9_read[0][1][0][0] == s9_msg_id
+
+        # 3. Delete the message directly from the stream before ACKing (creates phantom entry in PEL)
+        await r.xdel(STREAM_KEY, s9_msg_id)
+        print(f"[S9] Deleted message {s9_msg_id} from stream while remaining un-ACKed in PEL.")
+
+        # Verify it is still in PEL
+        p_s9_before = await r.xpending(STREAM_KEY, GROUP_NAME)
+        assert p_s9_before["pending"] >= 1, "Deleted message must still be in PEL"
+
+        # 4. Run worker with min-idle-ms 0 to trigger XAUTOCLAIM on the deleted message
+        print("[S9] Running worker to reclaim pending deleted/nil message...")
+        w9_res = run_worker_once("--min-idle-ms", "0")
+        print("[S9] Worker Output:\n", w9_res.stderr or w9_res.stdout)
+        assert w9_res.returncode == 0, f"Worker crashed on nil/deleted message! stderr: {w9_res.stderr}"
+
+        # 5. Verify the phantom entry was safely discarded and cleared from PEL
+        p_s9_after = await r.xpending(STREAM_KEY, GROUP_NAME)
+        print(f"[S9] PEL count after XAUTOCLAIM nil handling: {p_s9_after['pending']}")
+        assert p_s9_after["pending"] == 0, f"Phantom message was not evicted from PEL! Remaining: {p_s9_after['pending']}"
+        print("[S9 PASS] XAUTOCLAIM safely handled deleted/nil message and evicted phantom entry from PEL.")
+
+        print_banner("ALL 9 FAULT-TOLERANCE SCENARIOS PASSED WITH ZERO ERRORS!")
 
     finally:
         await r.aclose()

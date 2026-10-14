@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Any, Optional
 import asyncpg
 from app.config import Settings, get_settings
@@ -138,14 +139,18 @@ def get_db_pool() -> asyncpg.Pool:
 
 
 async def insert_spans(
-    pool: asyncpg.Pool, service_name: str, spans: list[SpanModel]
-) -> int:
+    pool: asyncpg.Pool,
+    service_name: str,
+    spans: list[SpanModel],
+    return_timings: bool = False,
+) -> Any:
     """
     Insert a batch of spans atomically using unnested arrays with ON CONFLICT DO NOTHING.
-    Returns the count of newly inserted records.
+    Returns the count of newly inserted records (int), or (count, (t_acquire, t_sql, t_commit))
+    if return_timings is True.
     """
     if not spans:
-        return 0
+        return (0, (0.0, 0.0, 0.0)) if return_timings else 0
 
     trace_ids = [s.trace_id for s in spans]
     span_ids = [s.span_id for s in spans]
@@ -157,8 +162,14 @@ async def insert_spans(
     status_codes = [s.status_code for s in spans]
     attributes_json = [json.dumps(s.attributes) for s in spans]
 
+    t_acq_start = time.perf_counter()
     async with pool.acquire() as conn:
-        async with conn.transaction():
+        t_acquire = time.perf_counter() - t_acq_start
+
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            t_sql_start = time.perf_counter()
             inserted_rows = await conn.fetch(
                 BATCH_INSERT_QUERY,
                 trace_ids,
@@ -171,7 +182,19 @@ async def insert_spans(
                 status_codes,
                 attributes_json,
             )
-            return len(inserted_rows)
+            t_sql = time.perf_counter() - t_sql_start
+
+            t_commit_start = time.perf_counter()
+            await tr.commit()
+            t_commit = time.perf_counter() - t_commit_start
+        except Exception:
+            await tr.rollback()
+            raise
+
+        count = len(inserted_rows)
+        if return_timings:
+            return count, (t_acquire, t_sql, t_commit)
+        return count
 
 
 async def get_spans_by_trace(

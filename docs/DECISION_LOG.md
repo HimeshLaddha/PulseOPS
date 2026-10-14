@@ -90,3 +90,59 @@ Day 3 decisively proves that **Hypothesis 3 (CPU Event Loop Serialization Satura
 3. **Follow-Up Platform Optimization:**
    - To achieve sub-10ms p95 latencies under burst concurrency, horizontal multi-worker Uvicorn processes (`--workers $(nproc)`), zero-copy JSON streaming, or offloading validation to Rust/Cython gateways will be evaluated in subsequent iterations.
 
+---
+
+## ADR-003: Stream Processing Edge-Case Reliability & Durability Guarantees
+
+### Status: ACCEPTED
+
+### Context
+During stream processing operations with Redis Streams, edge cases occur when messages in the Pending Entries List (PEL) have their underlying stream data deleted or truncated before acknowledgment, or when consumer worker crashes occur immediately following dead-letter queue (DLQ) writes but prior to stream ACK/DEL. Furthermore, operator expectations regarding data durability during container restarts vs. ungraceful host power outages required explicit architectural definition.
+
+### Decision
+1. **Defensive XAUTOCLAIM & Stream Unpacking (Phantom vs. Poison Pill Distinction):**
+   - In [backend/app/worker.py](file:///c:/Users/Admin/OneDrive/Desktop/PulseOPS/backend/app/worker.py), both `xautoclaim` and `xreadgroup` unpack stream messages defensively.
+   - If an entry has `fields is None` (confirmed phantom entry from deleted stream ID), the worker acknowledges it immediately to evict the phantom entry from the consumer group's PEL without attempting to route an empty ghost object.
+   - If `fields` is a dictionary but empty (`{}`) or missing the `"data"` field, it is NOT silently discarded; it is treated as a poison pill, routed to `telemetry:stream:deadletter` first, and only acknowledged/deleted after DLQ append succeeds.
+
+2. **Idempotent DLQ Replay Safety:**
+   - Un-ACKed poison pills reclaimed following pre-ACK worker crashes are processed idempotently. Re-delivery safely appends diagnostic metadata to `telemetry:stream:deadletter` and completes `XACK` + `XDEL` without pipeline disruption or unhandled exceptions.
+
+3. **Explicit Durability Model:**
+   - Redis operates with `--appendonly yes --appendfsync everysec`.
+   - **Clean Container & Service Restarts (Zero Loss):** Preserves 100% of stream data as the operating system flushes process buffers on clean shutdown before unmounting.
+   - **Ungraceful Termination (Potential Loss Window):** Any ungraceful termination (abrupt `kill -9` of Redis process, Docker engine crash, kernel panic, or sudden host reboot / power cut) before the 1-second background fsync cycle completes carries a potential loss window of recently acknowledged writes (up to 1 second of buffered telemetry). This trade-off is accepted to avoid the severe throughput penalty of synchronous per-write fsync.
+
+---
+
+## ADR-004: Fine-Grained DB Profiling, Reconciled Drain Metrics & Worker Concurrency Scaling
+
+### Status: ACCEPTED
+
+### Context
+In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker required extended drain times (e.g. ~63 s for Scenario E, ~27 s for Scenario D). Furthermore, initial pipeline measurements conflated worker active processing duration with overall end-to-end drain duration, and the root cause of the ~52 ms per-batch database stage ($T_3$) was unisolated between connection pool checkout queuing, SQL execution, and WAL commit / fsync.
+
+### Decision & Empirical Findings
+
+1. **Reconciliation of Pipeline Drain Metrics:**
+   - **Worker Active Drain Time:** $T_{\text{last\_batch\_acked}} - T_{\text{first\_batch\_fetched}}$  
+     Measures pure worker execution throughput from the timestamp when the first message was claimed/fetched to the timestamp when the final batch completed acknowledgment.
+   - **Total End-to-End Drain Time:** $T_{\text{queue\_empty}} - T_{\text{ingest\_start}}$  
+     Measures the comprehensive pipeline lifecycle from the moment the first client request was initiated until the stream and PEL reached depth 0.
+   - **Audit of $T_{\text{api\_redis}}$ Gateway Timer:**  
+     Isolated measurement reveals $T_{\text{api\_parse}}$ takes 0.63 ms ($p_{50} = 0.51\text{ ms}$) and $T_{\text{api\_serialize}}$ takes 0.12 ms ($p_{50} = 0.10\text{ ms}$). The remaining ~44 ms in `await redis.xadd()` under $C=10$ is not network I/O to Redis (which is <1 ms), but Python asyncio event loop task scheduling and context switching while 10 concurrent HTTP coroutines are multiplexed across a single thread.
+
+2. **Deconstruction of the 52 ms Database Persistence Bottleneck ($T_3$):**
+   Deconstructing the asyncpg database write step across 500 batches (50,000 spans) yielded:
+   - **$T_{3\text{a}}$ (Connection Pool Acquisition):** Mean = **0.025 ms** ($p_{50} = 0.021\text{ ms}, p_{95} = 0.044\text{ ms}$). Pool checkout contention is negligible.
+   - **$T_{3\text{b}}$ (SQL Parameterized UNNEST Execution):** Mean = **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$). **92.4%** of DB persistence time is spent executing the PostgreSQL query engine unnesting and indexing rows.
+   - **$T_{3\text{c}}$ (Transaction Commit / WAL flush phase):** Mean = **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$). The physical WAL flush phase accounts for only ~4.7% of DB time.
+
+3. **Horizontal Worker Scaling (1-Worker vs. 2-Worker Controlled Experiment):**
+   Testing on the identical Scenario D workload (500 requests $\times$ 100 spans = 50,000 spans at $C=10$):
+   - **Single Worker Baseline:** Worker active drain time = **27.168 s** (1,840.4 spans/s). Total E2E time = 27.839 s (1,796.0 spans/s).
+   - **Dual Concurrent Workers (`worker-1` + `worker-2`):** Worker active drain time = **14.284 s** (3,500.5 spans/s, **+90.2% throughput increase**). Total E2E time = 14.822 s (3,373.5 spans/s, **+87.8% throughput increase**).
+   - **Database Correctness:** Exactly 50,000 / 50,000 spans persisted in both runs with 0 duplicates and 0 errors.
+   - **Contention Impact:** Scaling to 2 workers caused zero database pool degradation ($T_{3\text{a}}$ remained 0.025 ms) and zero SQL query degradation ($T_{3\text{b}}$ remained 48.88 ms), demonstrating linear throughput scaling through horizontal worker concurrency without requiring schema alterations or unsafe PostgreSQL configuration adjustments.
+
+

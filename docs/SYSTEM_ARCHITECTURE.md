@@ -89,6 +89,12 @@ The background consumer worker (`backend/app/worker.py`) implements enterprise s
 - Malformed payloads (poison pills) are intercepted and routed to `telemetry:stream:deadletter` with diagnostic error metadata.
 - **Atomic Routing Guarantee:** If the write to `telemetry:stream:deadletter` fails, `XACK` is **never called** on the original message, ensuring it remains in the PEL for retry rather than being silently dropped.
 
+### F. Redis Stream Persistence & Explicit Durability Guarantees
+Redis is configured with `--appendonly yes --appendfsync everysec` and backed by a mounted volume (`redis_data`):
+- **Clean Container & Service Restarts (Zero Loss):** Clean container, service, or host restarts preserve 100% of stream data because the operating system flushes process buffers on clean termination before unmounting.
+- **Ungraceful Termination (Potential Loss Window):** Any ungraceful termination (abrupt Redis process kill e.g. `kill -9`, Docker daemon crash, OS kernel panic, or sudden host reboot / power cut) before the 1-second background sync completes carries a potential loss window of recently acknowledged writes (up to 1 second of in-flight buffered telemetry).
+- **Engineering Trade-off Rationale:** `appendfsync everysec` provides near-instantaneous in-memory write performance (~15,000–30,000 operations/sec) with bounded 1-second exposure, avoiding the severe 10x–100x disk I/O bottleneck of `appendfsync always` (fsync on every write), which would compromise the high-throughput ingest buffering requirement.
+
 ---
 
 ## 4. Trace Retrieval Flow

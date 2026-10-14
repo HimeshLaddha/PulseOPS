@@ -1,8 +1,8 @@
 # PulseOps — Current Status
 
-**Active Phase:** Day 3: Decoupled Ingestion & Comparative Profiling — **COMPLETE**  
-**Last Updated:** 2026-10-13  
-**Current Active Checkpoint:** Day 3 Completed (Checkpoints 1 - 5 Verified)
+**Active Phase:** Day 4: Profiling, Reliability & Worker Concurrency — **COMPLETE**  
+**Last Updated:** 2026-10-14  
+**Current Active Checkpoint:** Day 4 Checkpoint 3 Verified (Fine-Grained DB Profiling & 2-Worker Controlled Experiment)
 
 ---
 
@@ -76,4 +76,24 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
   - Atomic dead-letter stream routing with PEL fail-safety.
   - Explicit Redis AOF configuration (`--appendonly yes --appendfsync everysec`).
   - System architecture and README documentation synchronized.
+- [x] **Day 4 Checkpoint 1: Targeted Reliability Edge-Case Verification:**
+  - Defensive `xautoclaim` unpacking separating phantom deleted IDs from malformed stream payloads.
+  - Idempotent DLQ replay handling for un-ACKed poison pills following worker restarts.
+  - Durability contract defined in ADR-003: zero loss across clean container restarts; explicit 1-second potential loss window under ungraceful power cuts.
+  - All 9 integration fault tolerance scenarios verified in `backend/tests/test_day3_fault_tolerance.py`.
+- [x] **Day 4 Checkpoint 2: Worker Pipeline Profiling & Drain Bottleneck Isolation:**
+  - Isolated the single-worker 63-second Scenario E drain duration: worker fetch took 2.78 ms, parse took 0.28 ms, ack/del took 1.48 ms, but database persistence ($T_3$) took **52.28 ms per batch**. Over 1,000 batches, this created an irreducible serial bottleneck of ~52.3 seconds.
+- [x] **Day 4 Checkpoint 3: Fine-Grained DB Profiling & Worker Concurrency Experiment:**
+  - **Deconstructed Database Stage ($T_3$):**
+    - $T_{3\text{a}}$ (Connection Pool Acquisition): **0.025 ms** ($p_{50} = 0.021\text{ ms}, p_{95} = 0.044\text{ ms}$) — zero pool checkout contention.
+    - $T_{3\text{b}}$ (SQL Parameterized UNNEST Execution): **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$) — **92.4%** of DB persistence time is the PostgreSQL query engine unnesting and indexing rows.
+    - $T_{3\text{c}}$ (Transaction Commit / WAL flush phase): **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$) — the physical WAL commit phase accounts for only ~4.7% of DB time.
+  - **Audit of $T_{\text{api\_redis}}$ Gateway Timer:**
+    - Isolated $T_{\text{api\_parse}}$ (0.63 ms) and $T_{\text{api\_serialize}}$ (0.12 ms). Clarified that the ~44 ms in `await redis.xadd()` under $C=10$ is Python asyncio event loop task scheduling contention under concurrency, not Redis network I/O.
+  - **Controlled Concurrency Scaling Experiment (Scenario D: 50,000 spans):**
+    - **Run 1 (Single Worker):** Worker active drain time = **27.168 s** (1,840.4 spans/s). Total E2E time = 27.839 s (1,796.0 spans/s).
+    - **Run 2 (Dual Workers):** Worker active drain time = **14.284 s** (3,500.5 spans/s, **+90.2% throughput increase**). Total E2E time = 14.822 s (3,373.5 spans/s, **+87.8% throughput increase**).
+    - **100% Database Correctness:** Exactly 50,000 / 50,000 spans persisted in both runs with 0 duplicates and 0 errors.
+    - **ADR-004 Accepted:** Linear worker concurrency scaling documented in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
+
 
