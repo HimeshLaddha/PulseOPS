@@ -69,10 +69,10 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
 - [x] **Day 3 Checkpoint 5: Asynchronous Ingestion Benchmarks & Comparative Analysis** — 5-scenario benchmark matrix executed in `--mode stream`:
   - **177,100 / 177,100 spans persisted** with 0 discrepancy and 0 data loss across all 5 scenarios.
   - **Peak API Acceptance Throughput (Scenario D):** **14,032.42 spans/s** at $p_{50} = 63.16\text{ ms}$ and $p_{95} = 94.82\text{ ms}$ (+7.1% throughput improvement over Direct PG).
-  - **Bottleneck Isolation (Scenario E):** While Redis Streams decoupled producers from storage outages and database lock contention, Scenario E latency ($p_{95} = 700.11\text{ ms}$, $p_{50} = 242.30\text{ ms}$) demonstrated that single-process Python CPU serialization (Pydantic V2 recursive model validation and JSON parsing on the GIL-bound Uvicorn event loop) remains the gating performance constraint, requiring future multi-worker scaling.
+  - **Bottleneck Isolation (Scenario E):** While Redis Streams decoupled producers from storage outages and database lock contention, Scenario E latency ($p_{95} = 700.11\text{ ms}$, $p_{50} = 242.30\text{ ms}$) reflected single-process asyncio event loop task scheduling contention under high concurrency, while background persistence throughput in a single worker was constrained by the ~50–53 ms per-batch database roundtrip.
   - **ADR-002 Accepted:** Transitioned from `PROPOSED` to `ACCEPTED` in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
 - [x] **Day 3.5: Worker Reliability & Documentation Hardening:**
-  - Configurable reclamation lease window (`REDIS_STREAM_MIN_IDLE_MS = 5000`).
+  - Configurable reclamation idle threshold (`REDIS_STREAM_MIN_IDLE_MS = 5000`).
   - Atomic dead-letter stream routing with PEL fail-safety.
   - Explicit Redis AOF configuration (`--appendonly yes --appendfsync everysec`).
   - System architecture and README documentation synchronized.
@@ -86,8 +86,8 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
 - [x] **Day 4 Checkpoint 3: Fine-Grained DB Profiling & Worker Concurrency Experiment:**
   - **Deconstructed Database Stage ($T_3$):**
     - $T_{3\text{a}}$ (Connection Pool Acquisition): **0.025 ms** ($p_{50} = 0.021\text{ ms}, p_{95} = 0.044\text{ ms}$) — zero pool checkout contention.
-    - $T_{3\text{b}}$ (SQL Parameterized UNNEST Execution): **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$) — **92.4%** of DB persistence time is the PostgreSQL query engine unnesting and indexing rows.
-    - $T_{3\text{c}}$ (Transaction Commit / WAL flush phase): **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$) — the physical WAL commit phase accounts for only ~4.7% of DB time.
+    - $T_{3\text{b}}$ (SQL Fetch/Execute Duration): **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$) — client-observed query execution and row fetch duration via `conn.fetch` (does not isolate PostgreSQL internal execution). Accounts for ~92.4% of DB stage time.
+    - $T_{3\text{c}}$ (Transaction Commit Duration): **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$) — client-observed transaction commit duration via `tr.commit` (does not independently measure physical WAL fsync). Accounts for ~4.6% of DB stage time.
   - **Audit of $T_{\text{api\_redis}}$ Gateway Timer:**
     - Isolated $T_{\text{api\_parse}}$ (0.63 ms) and $T_{\text{api\_serialize}}$ (0.12 ms). Clarified that the ~44 ms in `await redis.xadd()` under $C=10$ is Python asyncio event loop task scheduling contention under concurrency, not Redis network I/O.
   - **Controlled Concurrency Scaling Experiment (Scenario D: 50,000 spans):**

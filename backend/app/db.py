@@ -148,6 +148,11 @@ async def insert_spans(
     Insert a batch of spans atomically using unnested arrays with ON CONFLICT DO NOTHING.
     Returns the count of newly inserted records (int), or (count, (t_acquire, t_sql, t_commit))
     if return_timings is True.
+
+    Timings record client-observed stage durations:
+    - t_acquire: Connection pool checkout duration.
+    - t_sql: Client-observed SQL query execution and fetch duration (does not isolate PostgreSQL internal execution).
+    - t_commit: Client-observed transaction commit duration (does not independently measure physical WAL fsync).
     """
     if not spans:
         return (0, (0.0, 0.0, 0.0)) if return_timings else 0
@@ -169,6 +174,7 @@ async def insert_spans(
         tr = conn.transaction()
         await tr.start()
         try:
+            # Client-observed SQL query execution and row fetch duration (conn.fetch)
             t_sql_start = time.perf_counter()
             inserted_rows = await conn.fetch(
                 BATCH_INSERT_QUERY,
@@ -184,6 +190,7 @@ async def insert_spans(
             )
             t_sql = time.perf_counter() - t_sql_start
 
+            # Client-observed transaction commit duration (tr.commit)
             t_commit_start = time.perf_counter()
             await tr.commit()
             t_commit = time.perf_counter() - t_commit_start

@@ -65,17 +65,17 @@ Total telemetry spans ingested across Day 3: **177,100 / 177,100 spans** verifie
 On Day 2, we formulated three unisolated hypotheses for the high-concurrency degradation observed under 25 workers:
 1. *PostgreSQL connection pool checkout queue starvation* (`DB_POOL_MAX_SIZE = 20 < 25`).
 2. *PostgreSQL WAL disk write contention* from 20 parallel transactions.
-3. *Single-threaded Python event loop CPU saturation* from Pydantic schema validation.
+3. *Single-threaded Python event loop contention* under concurrent requests.
 
 **Empirical Isolation Verdict:**
-Day 3 decisively proves that **Hypothesis 3 (CPU Event Loop Serialization Saturation)** is the primary gating constraint, rather than PostgreSQL pool limits or WAL locks:
+Day 3 decisively proves that request degradation under high concurrency is decoupled from downstream database pool limits or WAL locks:
 - In `mode=stream`, the database connection pool was entirely removed from the HTTP request path (FastAPI DB checkouts = 0).
 - Telemetry batches are published directly to an in-memory Redis 7 instance via single async `XADD` operations.
 - Despite eliminating database writes from the request path, tail latencies at Concurrency 25 remained in the ~240 ms (p50) to ~700 ms (p95) range.
-- **Root Cause:** In Python/Uvicorn, synchronous JSON decoding, Pydantic V2 recursive model validation, and JSON re-serialization (`model_dump_json()`) across 25 concurrent connections with 100-span batches occupy the single CPU core thread, causing client requests to wait in socket backlog queues before reaching the I/O event loop.
+- **Root Cause Analysis (Refined in Day 4):** While initially hypothesized as CPU saturation from Pydantic validation, fine-grained microsecond profiling established that Pydantic validation takes only ~0.3–0.6 ms per request. The tail latency under high concurrency is primarily driven by Python asyncio event loop task scheduling contention: cooperative multitasking across 25 concurrent connections with 100-span batches multiplexed over a single thread causes coroutines to wait in scheduler queues while awaiting I/O readiness.
 
 > [!NOTE]
-> While Redis Streams successfully decoupled producers from downstream storage outages and database lock contention, Scenario E latency ($p_{95} = 700.11\text{ ms}$) demonstrates that synchronous API serialization remains a performance constraint that must be addressed through multi-process worker or compiled gateway profiling.
+> While Redis Streams successfully decoupled producers from downstream storage outages and database lock contention, Scenario E latency ($p_{95} = 700.11\text{ ms}$) demonstrates that single-process event loop scheduling remains an API acceptance constraint under high concurrency, informing the roadmap toward multi-process Uvicorn workers.
 
 ### 3. Architectural Decision
 
@@ -84,7 +84,7 @@ Day 3 decisively proves that **Hypothesis 3 (CPU Event Loop Serialization Satura
    - Dual-mode support (`?mode=direct` and `?mode=stream`) is preserved for local development and integration testing.
 
 2. **Decoupled Worker Scaling:**
-   - Ingestion throughput is decoupled from database commit speed. While the API accepts batches at up to 14,032 spans/sec, a single background consumer worker drains the stream at ~1,600 spans/sec without blocking upstream callers.
+   - Ingestion throughput is decoupled from database commit speed. While the API accepts batches at up to 14,032 spans/sec, a single background consumer worker drains the stream at ~1,800 spans/sec without blocking upstream callers.
    - Horizontal scaling of workers across multiple processes/containers (`pulseops-ingest-group`) enables matching drain rate to ingestion rate without altering client APIs.
 
 3. **Follow-Up Platform Optimization:**
@@ -120,7 +120,7 @@ During stream processing operations with Redis Streams, edge cases occur when me
 ### Status: ACCEPTED
 
 ### Context
-In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker required extended drain times (e.g. ~63 s for Scenario E, ~27 s for Scenario D). Furthermore, initial pipeline measurements conflated worker active processing duration with overall end-to-end drain duration, and the root cause of the ~52 ms per-batch database stage ($T_3$) was unisolated between connection pool checkout queuing, SQL execution, and WAL commit / fsync.
+In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker required extended drain times (e.g. ~63 s for Scenario E, ~27 s for Scenario D). Furthermore, initial pipeline measurements conflated worker active processing duration with overall end-to-end drain duration, and the root cause of the ~52 ms per-batch database stage ($T_3$) was unisolated between connection pool checkout queuing, SQL query fetch/execution, and transaction commit.
 
 ### Decision & Empirical Findings
 
@@ -135,8 +135,8 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
 2. **Deconstruction of the 52 ms Database Persistence Bottleneck ($T_3$):**
    Deconstructing the asyncpg database write step across 500 batches (50,000 spans) yielded:
    - **$T_{3\text{a}}$ (Connection Pool Acquisition):** Mean = **0.025 ms** ($p_{50} = 0.021\text{ ms}, p_{95} = 0.044\text{ ms}$). Pool checkout contention is negligible.
-   - **$T_{3\text{b}}$ (SQL Parameterized UNNEST Execution):** Mean = **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$). **92.4%** of DB persistence time is spent executing the PostgreSQL query engine unnesting and indexing rows.
-   - **$T_{3\text{c}}$ (Transaction Commit / WAL flush phase):** Mean = **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$). The physical WAL flush phase accounts for only ~4.7% of DB time.
+   - **$T_{3\text{b}}$ (SQL Fetch/Execute Duration):** Mean = **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$). Client-observed duration executing the parameterized SQL UNNEST query and fetching returned rows (does not isolate PostgreSQL internal execution). Accounts for ~92.4% of total database roundtrip time.
+   - **$T_{3\text{c}}$ (Transaction Commit Duration):** Mean = **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$). Client-observed transaction commit duration via asyncpg (does not independently measure physical WAL fsync). Accounts for ~4.6% of database roundtrip time.
 
 3. **Horizontal Worker Scaling (1-Worker vs. 2-Worker Controlled Experiment):**
    Testing on the identical Scenario D workload (500 requests $\times$ 100 spans = 50,000 spans at $C=10$):

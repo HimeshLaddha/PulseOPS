@@ -72,9 +72,11 @@ The background consumer worker (`backend/app/worker.py`) implements enterprise s
 - Workers join the consumer group `pulseops-ingest-group` on `telemetry:stream`.
 - Stream and consumer group creation is idempotent using `XGROUP CREATE ... MKSTREAM`.
 
-### B. Pre-Commit Crash Recovery via `XAUTOCLAIM`
-- Before reading new stream messages, workers run `XAUTOCLAIM` to scan the Pending Entries List (PEL) for abandoned messages from crashed workers.
-- **Configurable Idle Window (`REDIS_STREAM_MIN_IDLE_MS` = 5000 ms):** Messages are only reclaimed if unacknowledged for longer than 5 seconds. This guarantees that active workers processing large batches are never preempted by competing workers.
+### B. Crash Recovery & Message Reclamation via `XAUTOCLAIM`
+- Before reading new stream messages, workers run `XAUTOCLAIM` to scan the Pending Entries List (PEL) for unacknowledged messages from crashed or stalled workers.
+- **Minimum Idle Threshold (`REDIS_STREAM_MIN_IDLE_MS` = 5000 ms):** Messages become eligible for reclaim only after remaining unacknowledged in the PEL for at least 5 seconds.
+- **Not a Guaranteed Lease:** This threshold represents a minimum idle duration, not a guaranteed lease or distributed lock. If a worker's processing duration exceeds `REDIS_STREAM_MIN_IDLE_MS` (e.g., due to downstream database stalls, GC pauses, or transient slowdowns), a competing worker may reclaim the message while the first worker is still actively processing it.
+- **Duplicate Delivery & Idempotency Requirement:** Because concurrent processing can result in duplicate delivery of the same message batch, downstream database persistence must be idempotent. In PulseOps, this is guaranteed by PostgreSQL primary key constraints on `(trace_id, span_id)` combined with `ON CONFLICT (trace_id, span_id) DO NOTHING`.
 
 ### C. Batch Fetch & Database Commit
 - New messages are fetched via `XREADGROUP ... STREAMS telemetry:stream >` in batches (default: 50 messages).
