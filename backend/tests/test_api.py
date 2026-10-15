@@ -1,5 +1,13 @@
+import os
+import sys
 import pytest
 from fastapi.testclient import TestClient
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(SCRIPT_DIR)
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
 from app.main import app
 
 
@@ -95,3 +103,99 @@ def test_ingest_and_query_vertical_slice(client):
     assert trace["trace_id"] == trace_id
     assert trace["span_count"] >= 1
     assert trace["spans"][0]["duration_ms"] == 100.0
+
+
+def test_stream_ingest_with_custom_stream_key(client):
+    custom_stream = "telemetry:stream:test_isolated"
+    payload = {
+        "service_name": "pytest-custom-stream",
+        "spans": [
+            {
+                "span_id": "cc22dd33ee44ff55",
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "parent_span_id": None,
+                "operation_name": "isolated_stream_op",
+                "start_time_unix_nano": 1700000000000000000,
+                "end_time_unix_nano": 1700000000050000000,
+                "status_code": "OK",
+                "attributes": {"isolated": True},
+            }
+        ],
+    }
+
+    resp = client.post(f"/v1/telemetry/spans?mode=stream&stream_key={custom_stream}", json=payload)
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert "stream_id" in data
+
+
+def test_benchmark_stream_isolation(client):
+    """
+    Verify that benchmark stream writes and cleanups are strictly isolated
+    and preserve default application stream data.
+    """
+    import redis
+    from app.config import get_settings
+
+    settings = get_settings()
+    sync_redis = redis.from_url(settings.redis_url, decode_responses=True)
+    benchmark_stream = "telemetry:stream:benchmark"
+    default_stream = settings.REDIS_STREAM_KEY
+
+    # 1. Write sentinel batch to default stream
+    sentinel_payload = {
+        "service_name": "app-sentinel-service",
+        "spans": [
+            {
+                "span_id": "9988776655443322",
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "parent_span_id": None,
+                "operation_name": "sentinel_op",
+                "start_time_unix_nano": 1700000000000000000,
+                "end_time_unix_nano": 1700000000050000000,
+                "status_code": "OK",
+                "attributes": {"sentinel": True},
+            }
+        ],
+    }
+    resp_def = client.post("/v1/telemetry/spans?mode=stream", json=sentinel_payload)
+    assert resp_def.status_code == 202
+    def_id = resp_def.json()["stream_id"]
+
+    # 2. Write benchmark batch to isolated stream
+    bench_payload = {
+        "service_name": "bench-isolated-service",
+        "spans": [
+            {
+                "span_id": "1122334455667788",
+                "trace_id": "0123456789abcdef0123456789abcdef",
+                "parent_span_id": None,
+                "operation_name": "bench_op",
+                "start_time_unix_nano": 1700000000000000000,
+                "end_time_unix_nano": 1700000000050000000,
+                "status_code": "OK",
+                "attributes": {"benchmark": True},
+            }
+        ],
+    }
+    resp_bench = client.post(
+        f"/v1/telemetry/spans?mode=stream&stream_key={benchmark_stream}",
+        json=bench_payload,
+    )
+    assert resp_bench.status_code == 202
+    bench_id = resp_bench.json()["stream_id"]
+
+    # 3. Simulate benchmark cleanup strictly targeting the benchmark stream
+    sync_redis.delete(benchmark_stream)
+    sync_redis.delete(f"{benchmark_stream}:deadletter")
+    assert sync_redis.xlen(benchmark_stream) == 0
+
+    # 4. Verify default stream data was untouched
+    default_entries = sync_redis.xrange(default_stream)
+    default_entry_ids = [entry[0] for entry in default_entries]
+    assert def_id in default_entry_ids, "Default application stream was modified or wiped!"
+
+    # Clean up sentinel from default stream
+    sync_redis.xdel(default_stream, def_id)
+    sync_redis.close()

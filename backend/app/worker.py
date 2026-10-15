@@ -291,6 +291,8 @@ async def run_worker(
     block_ms: int = 1000,
     consumer_name: Optional[str] = None,
     min_idle_ms: Optional[int] = None,
+    stream_key: Optional[str] = None,
+    group_name: Optional[str] = None,
 ):
     """
     Run the telemetry consumer worker loop.
@@ -304,8 +306,12 @@ async def run_worker(
         lease. If a worker takes longer than min_idle_ms to process a batch, another worker may reclaim
         the message, potentially causing duplicate delivery. Downstream PostgreSQL writes handle this
         safely via ON CONFLICT DO NOTHING idempotency.
+    :param stream_key: Optional Redis stream key override (defaults to settings.REDIS_STREAM_KEY).
+    :param group_name: Optional consumer group name override (defaults to settings.REDIS_CONSUMER_GROUP).
     """
     settings = get_settings()
+    effective_stream_key = stream_key or settings.REDIS_STREAM_KEY
+    effective_group_name = group_name or settings.REDIS_CONSUMER_GROUP
     effective_min_idle_ms = (
         min_idle_ms if min_idle_ms is not None else settings.REDIS_STREAM_MIN_IDLE_MS
     )
@@ -313,8 +319,10 @@ async def run_worker(
         consumer_name = f"worker-{uuid.uuid4().hex[:8]}"
 
     logger.info(
-        "Starting PulseOps ingestion worker '%s' (reclaim_idle_ms: %d)...",
+        "Starting PulseOps ingestion worker '%s' on stream '%s' / group '%s' (reclaim_idle_ms: %d)...",
         consumer_name,
+        effective_stream_key,
+        effective_group_name,
         effective_min_idle_ms,
     )
 
@@ -330,7 +338,7 @@ async def run_worker(
     tracker = WorkerProfilingTracker(consumer_name=consumer_name)
 
     try:
-        await init_consumer_group(redis_client, settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP)
+        await init_consumer_group(redis_client, effective_stream_key, effective_group_name)
 
         running = True
         total_processed = 0
@@ -341,8 +349,8 @@ async def run_worker(
                 try:
                     t_claim_start = time.perf_counter()
                     claim_res = await redis_client.xautoclaim(
-                        name=settings.REDIS_STREAM_KEY,
-                        groupname=settings.REDIS_CONSUMER_GROUP,
+                        name=effective_stream_key,
+                        groupname=effective_group_name,
                         consumername=consumer_name,
                         min_idle_time=effective_min_idle_ms,
                         start_id="0-0",
@@ -363,7 +371,7 @@ async def run_worker(
                                 msg_id,
                             )
                             try:
-                                await redis_client.xack(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, msg_id)
+                                await redis_client.xack(effective_stream_key, effective_group_name, msg_id)
                             except Exception as ack_err:
                                 logger.debug("Failed to xack phantom message %s: %s", msg_id, ack_err)
                             continue
@@ -372,8 +380,8 @@ async def run_worker(
                             inserted = await process_batch_message(
                                 pool=pool,
                                 redis_client=redis_client,
-                                stream_key=settings.REDIS_STREAM_KEY,
-                                group_name=settings.REDIS_CONSUMER_GROUP,
+                                stream_key=effective_stream_key,
+                                group_name=effective_group_name,
                                 msg_id=msg_id,
                                 fields=fields,
                                 tracker=tracker,
@@ -391,9 +399,9 @@ async def run_worker(
                 # 2. Read new messages with '>'
                 t_read_start = time.perf_counter()
                 response = await redis_client.xreadgroup(
-                    groupname=settings.REDIS_CONSUMER_GROUP,
+                    groupname=effective_group_name,
                     consumername=consumer_name,
-                    streams={settings.REDIS_STREAM_KEY: ">"},
+                    streams={effective_stream_key: ">"},
                     count=batch_size,
                     block=block_ms if not once else 500,
                 )
@@ -405,7 +413,7 @@ async def run_worker(
 
                 if not response and total_processed > 0:
                     try:
-                        cur_xlen = await redis_client.xlen(settings.REDIS_STREAM_KEY)
+                        cur_xlen = await redis_client.xlen(effective_stream_key)
                         if cur_xlen == 0:
                             tracker.save_json(os.path.join(BACKEND_DIR, "benchmarks", "results", "worker_profiling.json"))
                     except Exception:
@@ -424,7 +432,7 @@ async def run_worker(
                                     msg_id,
                                 )
                                 try:
-                                    await redis_client.xack(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, msg_id)
+                                    await redis_client.xack(effective_stream_key, effective_group_name, msg_id)
                                 except Exception:
                                     pass
                                 continue
@@ -433,8 +441,8 @@ async def run_worker(
                                 inserted = await process_batch_message(
                                     pool=pool,
                                     redis_client=redis_client,
-                                    stream_key=settings.REDIS_STREAM_KEY,
-                                    group_name=settings.REDIS_CONSUMER_GROUP,
+                                    stream_key=effective_stream_key,
+                                    group_name=effective_group_name,
                                     msg_id=msg_id,
                                     fields=fields,
                                     tracker=tracker,
@@ -450,7 +458,7 @@ async def run_worker(
                 # Backlog progress tracking & drain save
                 if total_processed > 0:
                     try:
-                        cur_xlen = await redis_client.xlen(settings.REDIS_STREAM_KEY)
+                        cur_xlen = await redis_client.xlen(effective_stream_key)
                         if total_processed % 50 == 0 or cur_xlen == 0 or once:
                             elapsed = max(0.001, time.perf_counter() - (tracker.start_time or time.perf_counter()))
                             logger.info(
@@ -502,6 +510,18 @@ def main():
         default=None,
         help="Min idle threshold in ms before unacknowledged messages are eligible for reclaim via XAUTOCLAIM (default: from REDIS_STREAM_MIN_IDLE_MS)",
     )
+    parser.add_argument(
+        "--stream-key",
+        type=str,
+        default=None,
+        help="Target Redis stream key (default: from REDIS_STREAM_KEY)",
+    )
+    parser.add_argument(
+        "--group-name",
+        type=str,
+        default=None,
+        help="Target Redis consumer group name (default: from REDIS_CONSUMER_GROUP)",
+    )
     args = parser.parse_args()
 
     is_once = args.once and not args.loop
@@ -512,6 +532,8 @@ def main():
             block_ms=args.block_ms,
             consumer_name=args.consumer_name,
             min_idle_ms=args.min_idle_ms,
+            stream_key=args.stream_key,
+            group_name=args.group_name,
         )
     )
 

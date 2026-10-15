@@ -172,6 +172,10 @@ async def ingest_spans(
         Optional[Literal["direct", "stream"]],
         Query(description="Ingestion mode: direct (PostgreSQL) or stream (Redis Streams)"),
     ] = None,
+    stream_key: Annotated[
+        Optional[str],
+        Query(description="Optional destination Redis stream key override (defaults to configured REDIS_STREAM_KEY)"),
+    ] = None,
 ):
     """
     Ingest an atomic batch of telemetry spans.
@@ -194,6 +198,7 @@ async def ingest_spans(
     t_api_parse = time.perf_counter() - t_parse_start
 
     if effective_mode == "stream":
+        target_stream = stream_key or settings.REDIS_STREAM_KEY
         t_ser_start = time.perf_counter()
         payload_json = request.model_dump_json()
         t_api_serialize = time.perf_counter() - t_ser_start
@@ -202,7 +207,7 @@ async def ingest_spans(
         try:
             redis = get_redis_client()
             stream_id = await redis.xadd(
-                settings.REDIS_STREAM_KEY,
+                target_stream,
                 {"data": payload_json},
             )
             t_api_redis_xadd = time.perf_counter() - t_redis_start

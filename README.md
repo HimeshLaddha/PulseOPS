@@ -121,7 +121,37 @@ Targeted microsecond instrumentation of the pipeline components revealed that in
 - **Client-Observed Transaction Commit Duration:** Approximately **2.4 ms** per batch (measured around `tr.commit()`; captures transaction completion duration without independently isolating physical disk WAL fsync).
 
 **Persistence Throughput Limitation:**
-While Redis Streams successfully decouples upstream HTTP callers so that the API accepts batches at up to ~14,000 spans/sec, a single background consumer worker is limited to persisting approximately **1,800–1,900 spans/sec** due to the serial ~50–53 ms per-batch database roundtrip. Draining high-concurrency bursts without accumulating a stream backlog requires scaling consumer workers concurrently (e.g., dual concurrent workers scale persistence throughput to ~3,500 spans/sec), rather than relying on a single consumer loop.
+While Redis Streams successfully decouples upstream HTTP callers so that the API accepts batches at up to ~14,000 spans/sec, a single background consumer worker is limited to persisting approximately **1,500–1,800 spans/sec** due to the serial ~50–60 ms per-batch database roundtrip. Draining high-concurrency bursts without accumulating an unbounded stream backlog requires scaling consumer workers concurrently rather than relying on a single consumer loop.
+
+### Day 5 Multi-Worker Scaling Comparison (1 -> 2 -> 4 Workers)
+
+> [!NOTE]
+> **Workload-Specific Observation:** The figures below reflect a controlled synthetic benchmark (50,000 spans, 500 requests $\times$ 100 spans/req at Concurrency = 10) on local Docker infrastructure (raw dataset: [`backend/benchmarks/results/day5_worker_scaling_experiment.json`](backend/benchmarks/results/day5_worker_scaling_experiment.json)). These are empirical observations, not universal performance guarantees.
+
+| Metric | 1 worker | 2 workers | 4 workers |
+|---|---:|---:|---:|
+| Persistence throughput | 1,503.1 spans/s | 3,032.6 spans/s | 5,541.9 spans/s |
+| End-to-end drain time | 33.931 s | 17.074 s | 9.773 s |
+| API p95 latency | 127.48 ms | 157.22 ms | 197.24 ms |
+| API p99 latency | 289.53 ms | 302.50 ms | 319.37 ms |
+| Missing spans reported | 0 | 0 | 0 |
+| Duplicate spans reported | 0 | 0 | 0 |
+
+#### Scaling Efficiency Arithmetic
+
+Using the conventional incremental-throughput efficiency formula:
+$$\text{Efficiency} = \frac{\text{Speedup} - 1}{\text{worker\_count} - 1} \times 100\%$$
+
+- **1 -> 2 Workers:** Speedup = $\frac{3032.6}{1503.1} = 2.02\times$ $\rightarrow$ Efficiency = $\frac{2.01756 - 1}{2 - 1} \times 100\% = \mathbf{101.8\%}$ (Throughput $+101.8\%$, end-to-end drain time $-49.7\%$).
+- **2 -> 4 Workers (Incremental):** Speedup = $\frac{5541.9}{3032.6} = 1.83\times$ $\rightarrow$ Efficiency = $\frac{1.82744 - 1}{2 - 1} \times 100\% = \mathbf{82.7\%}$ (Throughput $+82.7\%$, end-to-end drain time $-42.8\%$).
+- **1 -> 4 Workers (Overall):** Speedup = $\frac{5541.9}{1503.1} = 3.69\times$ $\rightarrow$ Efficiency = $\frac{3.68698 - 1}{4 - 1} \times 100\% = \mathbf{89.6\%}$ (Throughput $+268.7\%$, end-to-end drain time $-71.2\%$).
+
+#### Operational Trade-Off & Resource Contention
+
+Adding consumer workers demonstrates clear advantages alongside tangible architectural trade-offs:
+- **Throughput & Backlog Clearance:** Quad workers drain the 50,000-span backlog in under 10 seconds (5,541.9 spans/s) versus nearly 34 seconds for a single worker.
+- **API Latency Overhead:** Concurrently active worker processes compete with FastAPI and PostgreSQL for CPU scheduling and host resources. Consequently, API $p_{95}$ latency increased from 127.48 ms (1 worker) to 157.22 ms (2 workers) and 197.24 ms (4 workers); $p_{99}$ latency rose from 289.53 ms to 319.37 ms.
+- **Engineering Verdict:** Four workers are **not automatically optimal**. In production environments with constrained CPU cores, increasing worker concurrency trades off upstream API responsiveness for faster backlog clearance. The optimal worker count must be balanced against available CPU cores and latency SLOs.
 
 ---
 

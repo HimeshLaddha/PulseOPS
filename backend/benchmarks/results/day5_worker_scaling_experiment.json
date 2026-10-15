@@ -1,0 +1,2178 @@
+{
+  "metadata": {
+    "experiment": "Day 5: 1 -> 2 -> 4 Worker Scaling Experiment",
+    "workload": "500 requests x 100 spans = 50,000 spans",
+    "concurrency": 10,
+    "spans_per_request": 100,
+    "total_requests": 500,
+    "timestamp": "2026-10-16 02:10:57"
+  },
+  "run1_single_worker": {
+    "run_name": "Run 1 (Single Worker)",
+    "worker_count": 1,
+    "total_requests": 500,
+    "expected_spans": 50000,
+    "verified_db_spans": 50000,
+    "duplicate_spans": 0,
+    "api_wall_time_s": 4.317399300001853,
+    "worker_active_drain_s": 33.263606500004244,
+    "total_e2e_drain_s": 33.930798699999286,
+    "worker_active_throughput_spans_s": 1503.144284730329,
+    "e2e_throughput_spans_s": 1473.5874755580408,
+    "client_latencies_ms": {
+      "mean": 83.36578220006777,
+      "p50": 73.02949999939301,
+      "p95": 127.47711500014695,
+      "p99": 289.5252739977877
+    },
+    "gateway_metrics": {
+      "total_requests": 500,
+      "t_api_parse": {
+        "count": 500,
+        "min_ms": 0.32700000156182796,
+        "mean_ms": 0.877503199968487,
+        "p50_ms": 0.8111999995890073,
+        "p95_ms": 1.5684000027249567,
+        "p99_ms": 1.9851000033668242,
+        "max_ms": 25.1600999981747
+      },
+      "t_api_serialize": {
+        "count": 500,
+        "min_ms": 0.08739999611862004,
+        "mean_ms": 0.19592559977900237,
+        "p50_ms": 0.17630000365898013,
+        "p95_ms": 0.31519999902229756,
+        "p99_ms": 0.3752999982680194,
+        "max_ms": 0.7306000043172389
+      },
+      "t_api_redis_xadd": {
+        "count": 500,
+        "min_ms": 31.439799997315276,
+        "mean_ms": 45.626915199813084,
+        "p50_ms": 45.05800000333693,
+        "p95_ms": 49.98219999833964,
+        "p99_ms": 71.14189999992959,
+        "max_ms": 84.5363999978872
+      }
+    },
+    "worker_metrics": {
+      "single-worker": {
+        "consumer_name": "single-worker",
+        "messages_processed": 500,
+        "spans_persisted": 50000,
+        "first_batch_time": 45413.887371,
+        "last_batch_time": 45447.1509775,
+        "active_drain_seconds": 33.263606500004244,
+        "messages_per_sec": 15.031442847303289,
+        "spans_per_sec": 1503.144284730329,
+        "t_fetch": {
+          "count": 12,
+          "mean_ms": 21.668591666336095,
+          "p50_ms": 9.791399999812711,
+          "p95_ms": 144.93529999890598,
+          "p99_ms": 144.93529999890598,
+          "max_ms": 144.93529999890598
+        },
+        "t_parse": {
+          "count": 500,
+          "mean_ms": 0.6094458001607563,
+          "p50_ms": 0.5734000005759299,
+          "p95_ms": 1.0257999965688214,
+          "p99_ms": 1.3852000047336332,
+          "max_ms": 1.6432999982498586
+        },
+        "t_db": {
+          "count": 500,
+          "mean_ms": 62.625720400101265,
+          "p50_ms": 62.18879999505589,
+          "p95_ms": 69.22060000215424,
+          "p99_ms": 81.34969999809982,
+          "max_ms": 152.77870000136318
+        },
+        "t_ack": {
+          "count": 500,
+          "mean_ms": 3.02216220003902,
+          "p50_ms": 3.0633999995188788,
+          "p95_ms": 4.072399999131449,
+          "p99_ms": 4.897799997706898,
+          "max_ms": 6.222999996680301
+        },
+        "t_3a_pool_acquire": {
+          "count": 500,
+          "mean_ms": 0.03958520005107857,
+          "p50_ms": 0.036299999919719994,
+          "p95_ms": 0.06339999526971951,
+          "p99_ms": 0.09310000314144418,
+          "max_ms": 0.1460999992559664
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 500,
+          "mean_ms": 54.49358399993798,
+          "p50_ms": 54.20119999325834,
+          "p95_ms": 59.367600006225985,
+          "p99_ms": 64.50219999533147,
+          "max_ms": 140.46769999549724
+        },
+        "t_3b_sql_execute": {
+          "count": 500,
+          "mean_ms": 54.49358399993798,
+          "p50_ms": 54.20119999325834,
+          "p95_ms": 59.367600006225985,
+          "p99_ms": 64.50219999533147,
+          "max_ms": 140.46769999549724
+        },
+        "t_3c_transaction_commit": {
+          "count": 500,
+          "mean_ms": 4.905352399946423,
+          "p50_ms": 4.586399998515844,
+          "p95_ms": 7.582900005218107,
+          "p99_ms": 13.857699996151496,
+          "max_ms": 27.93290000408888
+        },
+        "t_3c_wal_commit": {
+          "count": 500,
+          "mean_ms": 4.905352399946423,
+          "p50_ms": 4.586399998515844,
+          "p95_ms": 7.582900005218107,
+          "p99_ms": 13.857699996151496,
+          "max_ms": 27.93290000408888
+        }
+      }
+    },
+    "workload_balance": {
+      "single-worker": {
+        "batches": 500,
+        "spans": 50000,
+        "share_pct": 100.0
+      }
+    },
+    "aggregate_worker_metrics": {
+      "t_fetch": {
+        "count": 12,
+        "mean_ms": 21.668591666336095,
+        "p50_ms": 9.791399999812711,
+        "p95_ms": 144.93529999890598,
+        "p99_ms": 144.93529999890598,
+        "max_ms": 144.93529999890598
+      },
+      "t_parse": {
+        "count": 500,
+        "mean_ms": 0.6094458001607563,
+        "p50_ms": 0.5734000005759299,
+        "p95_ms": 1.0257999965688214,
+        "p99_ms": 1.3852000047336332,
+        "max_ms": 1.6432999982498586
+      },
+      "t_db": {
+        "count": 500,
+        "mean_ms": 62.625720400101265,
+        "p50_ms": 62.18879999505589,
+        "p95_ms": 69.22060000215424,
+        "p99_ms": 81.34969999809982,
+        "max_ms": 152.77870000136318
+      },
+      "t_ack": {
+        "count": 500,
+        "mean_ms": 3.02216220003902,
+        "p50_ms": 3.0633999995188788,
+        "p95_ms": 4.072399999131449,
+        "p99_ms": 4.897799997706898,
+        "max_ms": 6.222999996680301
+      },
+      "t_3a_pool_acquire": {
+        "count": 500,
+        "mean_ms": 0.03958520005107857,
+        "p50_ms": 0.036299999919719994,
+        "p95_ms": 0.06339999526971951,
+        "p99_ms": 0.09310000314144418,
+        "max_ms": 0.1460999992559664
+      },
+      "t_3b_sql_fetch_execute": {
+        "count": 500,
+        "mean_ms": 54.49358399993798,
+        "p50_ms": 54.20119999325834,
+        "p95_ms": 59.367600006225985,
+        "p99_ms": 64.50219999533147,
+        "max_ms": 140.46769999549724
+      },
+      "t_3b_sql_execute": {
+        "count": 500,
+        "mean_ms": 54.49358399993798,
+        "p50_ms": 54.20119999325834,
+        "p95_ms": 59.367600006225985,
+        "p99_ms": 64.50219999533147,
+        "max_ms": 140.46769999549724
+      },
+      "t_3c_transaction_commit": {
+        "count": 500,
+        "mean_ms": 4.905352399946423,
+        "p50_ms": 4.586399998515844,
+        "p95_ms": 7.582900005218107,
+        "p99_ms": 13.857699996151496,
+        "max_ms": 27.93290000408888
+      },
+      "t_3c_wal_commit": {
+        "count": 500,
+        "mean_ms": 4.905352399946423,
+        "p50_ms": 4.586399998515844,
+        "p95_ms": 7.582900005218107,
+        "p99_ms": 13.857699996151496,
+        "max_ms": 27.93290000408888
+      }
+    },
+    "queue_progression": [
+      {
+        "time_s": 0.21,
+        "backlog_xlen": 0
+      },
+      {
+        "time_s": 0.45,
+        "backlog_xlen": 17
+      },
+      {
+        "time_s": 0.65,
+        "backlog_xlen": 36
+      },
+      {
+        "time_s": 0.85,
+        "backlog_xlen": 48
+      },
+      {
+        "time_s": 1.06,
+        "backlog_xlen": 70
+      },
+      {
+        "time_s": 1.24,
+        "backlog_xlen": 90
+      },
+      {
+        "time_s": 1.44,
+        "backlog_xlen": 112
+      },
+      {
+        "time_s": 1.65,
+        "backlog_xlen": 139
+      },
+      {
+        "time_s": 1.84,
+        "backlog_xlen": 159
+      },
+      {
+        "time_s": 2.03,
+        "backlog_xlen": 183
+      },
+      {
+        "time_s": 2.21,
+        "backlog_xlen": 199
+      },
+      {
+        "time_s": 2.4,
+        "backlog_xlen": 220
+      },
+      {
+        "time_s": 2.6,
+        "backlog_xlen": 243
+      },
+      {
+        "time_s": 2.79,
+        "backlog_xlen": 266
+      },
+      {
+        "time_s": 2.99,
+        "backlog_xlen": 291
+      },
+      {
+        "time_s": 3.18,
+        "backlog_xlen": 308
+      },
+      {
+        "time_s": 3.37,
+        "backlog_xlen": 330
+      },
+      {
+        "time_s": 3.57,
+        "backlog_xlen": 355
+      },
+      {
+        "time_s": 3.76,
+        "backlog_xlen": 375
+      },
+      {
+        "time_s": 3.96,
+        "backlog_xlen": 400
+      },
+      {
+        "time_s": 4.15,
+        "backlog_xlen": 422
+      },
+      {
+        "time_s": 4.34,
+        "backlog_xlen": 441
+      },
+      {
+        "time_s": 4.54,
+        "backlog_xlen": 438
+      },
+      {
+        "time_s": 4.76,
+        "backlog_xlen": 435
+      },
+      {
+        "time_s": 4.96,
+        "backlog_xlen": 432
+      },
+      {
+        "time_s": 5.18,
+        "backlog_xlen": 428
+      },
+      {
+        "time_s": 5.38,
+        "backlog_xlen": 425
+      },
+      {
+        "time_s": 5.58,
+        "backlog_xlen": 422
+      },
+      {
+        "time_s": 5.8,
+        "backlog_xlen": 418
+      },
+      {
+        "time_s": 5.99,
+        "backlog_xlen": 415
+      },
+      {
+        "time_s": 6.2,
+        "backlog_xlen": 412
+      },
+      {
+        "time_s": 6.41,
+        "backlog_xlen": 408
+      },
+      {
+        "time_s": 6.62,
+        "backlog_xlen": 405
+      },
+      {
+        "time_s": 6.82,
+        "backlog_xlen": 402
+      },
+      {
+        "time_s": 7.04,
+        "backlog_xlen": 399
+      },
+      {
+        "time_s": 7.24,
+        "backlog_xlen": 396
+      },
+      {
+        "time_s": 7.45,
+        "backlog_xlen": 393
+      },
+      {
+        "time_s": 7.66,
+        "backlog_xlen": 389
+      },
+      {
+        "time_s": 7.88,
+        "backlog_xlen": 386
+      },
+      {
+        "time_s": 8.1,
+        "backlog_xlen": 383
+      },
+      {
+        "time_s": 8.32,
+        "backlog_xlen": 380
+      },
+      {
+        "time_s": 8.51,
+        "backlog_xlen": 377
+      },
+      {
+        "time_s": 8.72,
+        "backlog_xlen": 373
+      },
+      {
+        "time_s": 8.93,
+        "backlog_xlen": 370
+      },
+      {
+        "time_s": 9.14,
+        "backlog_xlen": 367
+      },
+      {
+        "time_s": 9.36,
+        "backlog_xlen": 364
+      },
+      {
+        "time_s": 9.56,
+        "backlog_xlen": 360
+      },
+      {
+        "time_s": 9.76,
+        "backlog_xlen": 357
+      },
+      {
+        "time_s": 9.97,
+        "backlog_xlen": 354
+      },
+      {
+        "time_s": 10.19,
+        "backlog_xlen": 351
+      },
+      {
+        "time_s": 10.4,
+        "backlog_xlen": 348
+      },
+      {
+        "time_s": 10.61,
+        "backlog_xlen": 344
+      },
+      {
+        "time_s": 10.79,
+        "backlog_xlen": 341
+      },
+      {
+        "time_s": 11.0,
+        "backlog_xlen": 338
+      },
+      {
+        "time_s": 11.2,
+        "backlog_xlen": 336
+      },
+      {
+        "time_s": 11.4,
+        "backlog_xlen": 333
+      },
+      {
+        "time_s": 11.61,
+        "backlog_xlen": 330
+      },
+      {
+        "time_s": 11.81,
+        "backlog_xlen": 327
+      },
+      {
+        "time_s": 12.03,
+        "backlog_xlen": 323
+      },
+      {
+        "time_s": 12.23,
+        "backlog_xlen": 320
+      },
+      {
+        "time_s": 12.42,
+        "backlog_xlen": 317
+      },
+      {
+        "time_s": 12.62,
+        "backlog_xlen": 314
+      },
+      {
+        "time_s": 12.83,
+        "backlog_xlen": 311
+      },
+      {
+        "time_s": 13.03,
+        "backlog_xlen": 307
+      },
+      {
+        "time_s": 13.23,
+        "backlog_xlen": 304
+      },
+      {
+        "time_s": 13.41,
+        "backlog_xlen": 301
+      },
+      {
+        "time_s": 13.62,
+        "backlog_xlen": 297
+      },
+      {
+        "time_s": 13.83,
+        "backlog_xlen": 294
+      },
+      {
+        "time_s": 14.04,
+        "backlog_xlen": 290
+      },
+      {
+        "time_s": 14.25,
+        "backlog_xlen": 287
+      },
+      {
+        "time_s": 14.45,
+        "backlog_xlen": 284
+      },
+      {
+        "time_s": 14.67,
+        "backlog_xlen": 281
+      },
+      {
+        "time_s": 14.87,
+        "backlog_xlen": 278
+      },
+      {
+        "time_s": 15.08,
+        "backlog_xlen": 275
+      },
+      {
+        "time_s": 15.3,
+        "backlog_xlen": 272
+      },
+      {
+        "time_s": 15.5,
+        "backlog_xlen": 269
+      },
+      {
+        "time_s": 15.7,
+        "backlog_xlen": 266
+      },
+      {
+        "time_s": 15.92,
+        "backlog_xlen": 263
+      },
+      {
+        "time_s": 16.12,
+        "backlog_xlen": 260
+      },
+      {
+        "time_s": 16.34,
+        "backlog_xlen": 257
+      },
+      {
+        "time_s": 16.56,
+        "backlog_xlen": 254
+      },
+      {
+        "time_s": 16.76,
+        "backlog_xlen": 251
+      },
+      {
+        "time_s": 16.96,
+        "backlog_xlen": 248
+      },
+      {
+        "time_s": 17.17,
+        "backlog_xlen": 245
+      },
+      {
+        "time_s": 17.37,
+        "backlog_xlen": 242
+      },
+      {
+        "time_s": 17.59,
+        "backlog_xlen": 239
+      },
+      {
+        "time_s": 17.81,
+        "backlog_xlen": 235
+      },
+      {
+        "time_s": 17.99,
+        "backlog_xlen": 233
+      },
+      {
+        "time_s": 18.2,
+        "backlog_xlen": 230
+      },
+      {
+        "time_s": 18.4,
+        "backlog_xlen": 227
+      },
+      {
+        "time_s": 18.62,
+        "backlog_xlen": 223
+      },
+      {
+        "time_s": 18.82,
+        "backlog_xlen": 221
+      },
+      {
+        "time_s": 19.04,
+        "backlog_xlen": 217
+      },
+      {
+        "time_s": 19.25,
+        "backlog_xlen": 214
+      },
+      {
+        "time_s": 19.47,
+        "backlog_xlen": 211
+      },
+      {
+        "time_s": 19.69,
+        "backlog_xlen": 208
+      },
+      {
+        "time_s": 19.89,
+        "backlog_xlen": 204
+      },
+      {
+        "time_s": 20.11,
+        "backlog_xlen": 201
+      },
+      {
+        "time_s": 20.33,
+        "backlog_xlen": 198
+      },
+      {
+        "time_s": 20.54,
+        "backlog_xlen": 195
+      },
+      {
+        "time_s": 20.74,
+        "backlog_xlen": 192
+      },
+      {
+        "time_s": 20.96,
+        "backlog_xlen": 189
+      },
+      {
+        "time_s": 21.16,
+        "backlog_xlen": 186
+      },
+      {
+        "time_s": 21.38,
+        "backlog_xlen": 182
+      },
+      {
+        "time_s": 21.6,
+        "backlog_xlen": 179
+      },
+      {
+        "time_s": 21.81,
+        "backlog_xlen": 176
+      },
+      {
+        "time_s": 22.03,
+        "backlog_xlen": 172
+      },
+      {
+        "time_s": 22.25,
+        "backlog_xlen": 169
+      },
+      {
+        "time_s": 22.46,
+        "backlog_xlen": 166
+      },
+      {
+        "time_s": 22.66,
+        "backlog_xlen": 163
+      },
+      {
+        "time_s": 22.86,
+        "backlog_xlen": 160
+      },
+      {
+        "time_s": 23.08,
+        "backlog_xlen": 157
+      },
+      {
+        "time_s": 23.3,
+        "backlog_xlen": 154
+      },
+      {
+        "time_s": 23.5,
+        "backlog_xlen": 151
+      },
+      {
+        "time_s": 23.72,
+        "backlog_xlen": 148
+      },
+      {
+        "time_s": 23.92,
+        "backlog_xlen": 145
+      },
+      {
+        "time_s": 24.12,
+        "backlog_xlen": 142
+      },
+      {
+        "time_s": 24.32,
+        "backlog_xlen": 139
+      },
+      {
+        "time_s": 24.53,
+        "backlog_xlen": 136
+      },
+      {
+        "time_s": 24.73,
+        "backlog_xlen": 133
+      },
+      {
+        "time_s": 24.93,
+        "backlog_xlen": 130
+      },
+      {
+        "time_s": 25.14,
+        "backlog_xlen": 127
+      },
+      {
+        "time_s": 25.34,
+        "backlog_xlen": 124
+      },
+      {
+        "time_s": 25.56,
+        "backlog_xlen": 121
+      },
+      {
+        "time_s": 25.76,
+        "backlog_xlen": 118
+      },
+      {
+        "time_s": 25.97,
+        "backlog_xlen": 115
+      },
+      {
+        "time_s": 26.15,
+        "backlog_xlen": 112
+      },
+      {
+        "time_s": 26.36,
+        "backlog_xlen": 109
+      },
+      {
+        "time_s": 26.56,
+        "backlog_xlen": 106
+      },
+      {
+        "time_s": 26.76,
+        "backlog_xlen": 103
+      },
+      {
+        "time_s": 26.96,
+        "backlog_xlen": 100
+      },
+      {
+        "time_s": 27.18,
+        "backlog_xlen": 97
+      },
+      {
+        "time_s": 27.38,
+        "backlog_xlen": 94
+      },
+      {
+        "time_s": 27.6,
+        "backlog_xlen": 91
+      },
+      {
+        "time_s": 27.82,
+        "backlog_xlen": 88
+      },
+      {
+        "time_s": 28.02,
+        "backlog_xlen": 85
+      },
+      {
+        "time_s": 28.22,
+        "backlog_xlen": 82
+      },
+      {
+        "time_s": 28.43,
+        "backlog_xlen": 79
+      },
+      {
+        "time_s": 28.64,
+        "backlog_xlen": 76
+      },
+      {
+        "time_s": 28.85,
+        "backlog_xlen": 73
+      },
+      {
+        "time_s": 29.07,
+        "backlog_xlen": 69
+      },
+      {
+        "time_s": 29.29,
+        "backlog_xlen": 66
+      },
+      {
+        "time_s": 29.5,
+        "backlog_xlen": 63
+      },
+      {
+        "time_s": 29.72,
+        "backlog_xlen": 59
+      },
+      {
+        "time_s": 29.94,
+        "backlog_xlen": 56
+      },
+      {
+        "time_s": 30.16,
+        "backlog_xlen": 53
+      },
+      {
+        "time_s": 30.37,
+        "backlog_xlen": 50
+      },
+      {
+        "time_s": 30.57,
+        "backlog_xlen": 47
+      },
+      {
+        "time_s": 30.78,
+        "backlog_xlen": 44
+      },
+      {
+        "time_s": 30.98,
+        "backlog_xlen": 41
+      },
+      {
+        "time_s": 31.18,
+        "backlog_xlen": 38
+      },
+      {
+        "time_s": 31.39,
+        "backlog_xlen": 35
+      },
+      {
+        "time_s": 31.59,
+        "backlog_xlen": 32
+      },
+      {
+        "time_s": 31.81,
+        "backlog_xlen": 29
+      },
+      {
+        "time_s": 32.01,
+        "backlog_xlen": 26
+      },
+      {
+        "time_s": 32.22,
+        "backlog_xlen": 22
+      },
+      {
+        "time_s": 32.42,
+        "backlog_xlen": 19
+      },
+      {
+        "time_s": 32.63,
+        "backlog_xlen": 16
+      },
+      {
+        "time_s": 32.83,
+        "backlog_xlen": 13
+      },
+      {
+        "time_s": 33.05,
+        "backlog_xlen": 10
+      },
+      {
+        "time_s": 33.24,
+        "backlog_xlen": 7
+      },
+      {
+        "time_s": 33.45,
+        "backlog_xlen": 3
+      },
+      {
+        "time_s": 33.67,
+        "backlog_xlen": 0
+      },
+      {
+        "time_s": 33.88,
+        "backlog_xlen": 0
+      }
+    ]
+  },
+  "run2_dual_workers": {
+    "run_name": "Run 2 (Dual Workers)",
+    "worker_count": 2,
+    "total_requests": 500,
+    "expected_spans": 50000,
+    "verified_db_spans": 50000,
+    "duplicate_spans": 0,
+    "api_wall_time_s": 4.86825229999522,
+    "worker_active_drain_s": 16.487506500001473,
+    "total_e2e_drain_s": 17.07400079999934,
+    "worker_active_throughput_spans_s": 3032.599259323751,
+    "e2e_throughput_spans_s": 2928.429053371131,
+    "client_latencies_ms": {
+      "mean": 93.58954859986261,
+      "p50": 80.65480000368552,
+      "p95": 157.2203449981315,
+      "p99": 302.4961900011112
+    },
+    "gateway_metrics": {
+      "total_requests": 500,
+      "t_api_parse": {
+        "count": 500,
+        "min_ms": 0.3144999936921522,
+        "mean_ms": 0.9893281999829925,
+        "p50_ms": 0.9288000001106411,
+        "p95_ms": 1.6672999990987591,
+        "p99_ms": 2.2812000024714507,
+        "max_ms": 26.50569999968866
+      },
+      "t_api_serialize": {
+        "count": 500,
+        "min_ms": 0.0914999982342124,
+        "mean_ms": 0.22265039998455904,
+        "p50_ms": 0.2133999951183796,
+        "p95_ms": 0.36669999826699495,
+        "p99_ms": 0.45089999912306666,
+        "max_ms": 1.56050000077812
+      },
+      "t_api_redis_xadd": {
+        "count": 500,
+        "min_ms": 41.95350000372855,
+        "mean_ms": 45.784346800108324,
+        "p50_ms": 45.281999999133404,
+        "p95_ms": 50.05589999927906,
+        "p99_ms": 55.46380000305362,
+        "max_ms": 70.3944999986561
+      }
+    },
+    "worker_metrics": {
+      "worker-1": {
+        "consumer_name": "worker-1",
+        "messages_processed": 253,
+        "spans_persisted": 25300,
+        "first_batch_time": 45454.1609438,
+        "last_batch_time": 45470.6443143,
+        "active_drain_seconds": 16.483370499998273,
+        "messages_per_sec": 15.348802600780376,
+        "spans_per_sec": 1534.8802600780375,
+        "t_fetch": {
+          "count": 8,
+          "mean_ms": 24.11613750155084,
+          "p50_ms": 8.571200000005774,
+          "p95_ms": 133.84829999995418,
+          "p99_ms": 133.84829999995418,
+          "max_ms": 133.84829999995418
+        },
+        "t_parse": {
+          "count": 253,
+          "mean_ms": 0.7062462447986482,
+          "p50_ms": 0.6628999981330708,
+          "p95_ms": 1.0856000008061528,
+          "p99_ms": 1.3793999969493598,
+          "max_ms": 2.636799996253103
+        },
+        "t_db": {
+          "count": 253,
+          "mean_ms": 61.285226087025165,
+          "p50_ms": 60.991300000750925,
+          "p95_ms": 68.16589999652933,
+          "p99_ms": 82.6801000002888,
+          "max_ms": 120.71270000160439
+        },
+        "t_ack": {
+          "count": 253,
+          "mean_ms": 3.0266304346886943,
+          "p50_ms": 2.998799995111767,
+          "p95_ms": 4.404100000101607,
+          "p99_ms": 5.507900001248345,
+          "max_ms": 6.17200000124285
+        },
+        "t_3a_pool_acquire": {
+          "count": 253,
+          "mean_ms": 0.04469762862132671,
+          "p50_ms": 0.041799998143687844,
+          "p95_ms": 0.07360000017797574,
+          "p99_ms": 0.09670000144978985,
+          "max_ms": 0.11809999705292284
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 253,
+          "mean_ms": 53.79553043451818,
+          "p50_ms": 53.55550000240328,
+          "p95_ms": 58.460300002479926,
+          "p99_ms": 65.7197999971686,
+          "max_ms": 113.43309999938356
+        },
+        "t_3b_sql_execute": {
+          "count": 253,
+          "mean_ms": 53.79553043451818,
+          "p50_ms": 53.55550000240328,
+          "p95_ms": 58.460300002479926,
+          "p99_ms": 65.7197999971686,
+          "max_ms": 113.43309999938356
+        },
+        "t_3c_transaction_commit": {
+          "count": 253,
+          "mean_ms": 4.189599604395783,
+          "p50_ms": 3.937699999369215,
+          "p95_ms": 5.92750000214437,
+          "p99_ms": 10.433800001919735,
+          "max_ms": 49.27789999783272
+        },
+        "t_3c_wal_commit": {
+          "count": 253,
+          "mean_ms": 4.189599604395783,
+          "p50_ms": 3.937699999369215,
+          "p95_ms": 5.92750000214437,
+          "p99_ms": 10.433800001919735,
+          "max_ms": 49.27789999783272
+        }
+      },
+      "worker-2": {
+        "consumer_name": "worker-2",
+        "messages_processed": 247,
+        "spans_persisted": 24700,
+        "first_batch_time": 45454.1568078,
+        "last_batch_time": 45470.1846505,
+        "active_drain_seconds": 16.0278427000012,
+        "messages_per_sec": 15.410682811354361,
+        "spans_per_sec": 1541.068281135436,
+        "t_fetch": {
+          "count": 8,
+          "mean_ms": 22.87155000067287,
+          "p50_ms": 8.221600000979379,
+          "p95_ms": 128.28279999666847,
+          "p99_ms": 128.28279999666847,
+          "max_ms": 128.28279999666847
+        },
+        "t_parse": {
+          "count": 247,
+          "mean_ms": 0.7110534409986741,
+          "p50_ms": 0.6676000048173591,
+          "p95_ms": 1.1174999963259324,
+          "p99_ms": 1.348500001768116,
+          "max_ms": 3.2025000036810525
+        },
+        "t_db": {
+          "count": 247,
+          "mean_ms": 61.002072874440856,
+          "p50_ms": 60.9171999967657,
+          "p95_ms": 66.65809999685735,
+          "p99_ms": 74.34120000107214,
+          "max_ms": 121.97549999837065
+        },
+        "t_ack": {
+          "count": 247,
+          "mean_ms": 3.059870445146885,
+          "p50_ms": 3.0489999990095384,
+          "p95_ms": 4.756800000905059,
+          "p99_ms": 5.311300003086217,
+          "max_ms": 5.8253000024706125
+        },
+        "t_3a_pool_acquire": {
+          "count": 247,
+          "mean_ms": 0.046463562531475926,
+          "p50_ms": 0.042100000428035855,
+          "p95_ms": 0.07890000415500253,
+          "p99_ms": 0.12849999620812014,
+          "max_ms": 0.17309999384451658
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 247,
+          "mean_ms": 53.58071174067355,
+          "p50_ms": 53.19199999939883,
+          "p95_ms": 58.00879999878816,
+          "p99_ms": 62.73669999791309,
+          "max_ms": 114.0806999974302
+        },
+        "t_3b_sql_execute": {
+          "count": 247,
+          "mean_ms": 53.58071174067355,
+          "p50_ms": 53.19199999939883,
+          "p95_ms": 58.00879999878816,
+          "p99_ms": 62.73669999791309,
+          "max_ms": 114.0806999974302
+        },
+        "t_3c_transaction_commit": {
+          "count": 247,
+          "mean_ms": 4.1228919027836035,
+          "p50_ms": 4.057199999806471,
+          "p95_ms": 5.605099999229424,
+          "p99_ms": 7.070200001180638,
+          "max_ms": 40.77320000214968
+        },
+        "t_3c_wal_commit": {
+          "count": 247,
+          "mean_ms": 4.1228919027836035,
+          "p50_ms": 4.057199999806471,
+          "p95_ms": 5.605099999229424,
+          "p99_ms": 7.070200001180638,
+          "max_ms": 40.77320000214968
+        }
+      }
+    },
+    "workload_balance": {
+      "worker-1": {
+        "batches": 253,
+        "spans": 25300,
+        "share_pct": 50.6
+      },
+      "worker-2": {
+        "batches": 247,
+        "spans": 24700,
+        "share_pct": 49.4
+      }
+    },
+    "aggregate_worker_metrics": {
+      "t_fetch": {
+        "count": 16,
+        "mean_ms": 23.493843751111854,
+        "p50_ms": 8.396400000492577,
+        "p95_ms": 131.06554999831133,
+        "p99_ms": 131.06554999831133,
+        "max_ms": 133.84829999995418
+      },
+      "t_parse": {
+        "count": 500,
+        "mean_ms": 0.708620999721461,
+        "p50_ms": 0.6652218014351092,
+        "p95_ms": 1.101358598592924,
+        "p99_ms": 1.3641353993298253,
+        "max_ms": 3.2025000036810525
+      },
+      "t_db": {
+        "count": 500,
+        "mean_ms": 61.145348400008515,
+        "p50_ms": 60.954694598782226,
+        "p95_ms": 67.42104679669137,
+        "p99_ms": 78.56068340067577,
+        "max_ms": 121.97549999837065
+      },
+      "t_ack": {
+        "count": 500,
+        "mean_ms": 3.0430509998550406,
+        "p50_ms": 3.023598797037266,
+        "p95_ms": 4.578333800498513,
+        "p99_ms": 5.4107796021562535,
+        "max_ms": 6.17200000124285
+      },
+      "t_3a_pool_acquire": {
+        "count": 500,
+        "mean_ms": 0.04556999997294042,
+        "p50_ms": 0.04194819927215576,
+        "p95_ms": 0.07621820214262698,
+        "p99_ms": 0.11240919886040501,
+        "max_ms": 0.17309999384451658
+      },
+      "t_3b_sql_fetch_execute": {
+        "count": 500,
+        "mean_ms": 53.68940999975893,
+        "p50_ms": 53.37593100091908,
+        "p95_ms": 58.237259000656195,
+        "p99_ms": 64.24614859753638,
+        "max_ms": 114.0806999974302
+      },
+      "t_3b_sql_execute": {
+        "count": 500,
+        "mean_ms": 53.68940999975893,
+        "p50_ms": 53.37593100091908,
+        "p95_ms": 58.237259000656195,
+        "p99_ms": 64.24614859753638,
+        "max_ms": 114.0806999974302
+      },
+      "t_3c_transaction_commit": {
+        "count": 500,
+        "mean_ms": 4.156645999799366,
+        "p50_ms": 3.9967329995852197,
+        "p95_ms": 5.768234400704387,
+        "p99_ms": 8.772181601554621,
+        "max_ms": 49.27789999783272
+      },
+      "t_3c_wal_commit": {
+        "count": 500,
+        "mean_ms": 4.156645999799366,
+        "p50_ms": 3.9967329995852197,
+        "p95_ms": 5.768234400704387,
+        "p99_ms": 8.772181601554621,
+        "max_ms": 49.27789999783272
+      }
+    },
+    "queue_progression": [
+      {
+        "time_s": 0.21,
+        "backlog_xlen": 0
+      },
+      {
+        "time_s": 0.39,
+        "backlog_xlen": 12
+      },
+      {
+        "time_s": 0.63,
+        "backlog_xlen": 33
+      },
+      {
+        "time_s": 0.83,
+        "backlog_xlen": 47
+      },
+      {
+        "time_s": 1.06,
+        "backlog_xlen": 56
+      },
+      {
+        "time_s": 1.27,
+        "backlog_xlen": 71
+      },
+      {
+        "time_s": 1.46,
+        "backlog_xlen": 86
+      },
+      {
+        "time_s": 1.66,
+        "backlog_xlen": 104
+      },
+      {
+        "time_s": 1.86,
+        "backlog_xlen": 123
+      },
+      {
+        "time_s": 2.05,
+        "backlog_xlen": 141
+      },
+      {
+        "time_s": 2.25,
+        "backlog_xlen": 157
+      },
+      {
+        "time_s": 2.47,
+        "backlog_xlen": 165
+      },
+      {
+        "time_s": 2.68,
+        "backlog_xlen": 177
+      },
+      {
+        "time_s": 2.9,
+        "backlog_xlen": 196
+      },
+      {
+        "time_s": 3.1,
+        "backlog_xlen": 213
+      },
+      {
+        "time_s": 3.32,
+        "backlog_xlen": 227
+      },
+      {
+        "time_s": 3.51,
+        "backlog_xlen": 243
+      },
+      {
+        "time_s": 3.69,
+        "backlog_xlen": 259
+      },
+      {
+        "time_s": 3.89,
+        "backlog_xlen": 281
+      },
+      {
+        "time_s": 4.1,
+        "backlog_xlen": 302
+      },
+      {
+        "time_s": 4.31,
+        "backlog_xlen": 319
+      },
+      {
+        "time_s": 4.51,
+        "backlog_xlen": 336
+      },
+      {
+        "time_s": 4.71,
+        "backlog_xlen": 354
+      },
+      {
+        "time_s": 4.92,
+        "backlog_xlen": 366
+      },
+      {
+        "time_s": 5.13,
+        "backlog_xlen": 358
+      },
+      {
+        "time_s": 5.34,
+        "backlog_xlen": 351
+      },
+      {
+        "time_s": 5.55,
+        "backlog_xlen": 344
+      },
+      {
+        "time_s": 5.75,
+        "backlog_xlen": 338
+      },
+      {
+        "time_s": 5.96,
+        "backlog_xlen": 332
+      },
+      {
+        "time_s": 6.17,
+        "backlog_xlen": 326
+      },
+      {
+        "time_s": 6.38,
+        "backlog_xlen": 318
+      },
+      {
+        "time_s": 6.58,
+        "backlog_xlen": 312
+      },
+      {
+        "time_s": 6.79,
+        "backlog_xlen": 306
+      },
+      {
+        "time_s": 7.0,
+        "backlog_xlen": 300
+      },
+      {
+        "time_s": 7.19,
+        "backlog_xlen": 294
+      },
+      {
+        "time_s": 7.39,
+        "backlog_xlen": 288
+      },
+      {
+        "time_s": 7.61,
+        "backlog_xlen": 282
+      },
+      {
+        "time_s": 7.81,
+        "backlog_xlen": 274
+      },
+      {
+        "time_s": 8.03,
+        "backlog_xlen": 267
+      },
+      {
+        "time_s": 8.25,
+        "backlog_xlen": 260
+      },
+      {
+        "time_s": 8.44,
+        "backlog_xlen": 254
+      },
+      {
+        "time_s": 8.66,
+        "backlog_xlen": 248
+      },
+      {
+        "time_s": 8.86,
+        "backlog_xlen": 242
+      },
+      {
+        "time_s": 9.06,
+        "backlog_xlen": 236
+      },
+      {
+        "time_s": 9.26,
+        "backlog_xlen": 228
+      },
+      {
+        "time_s": 9.48,
+        "backlog_xlen": 222
+      },
+      {
+        "time_s": 9.68,
+        "backlog_xlen": 216
+      },
+      {
+        "time_s": 9.89,
+        "backlog_xlen": 210
+      },
+      {
+        "time_s": 10.07,
+        "backlog_xlen": 204
+      },
+      {
+        "time_s": 10.29,
+        "backlog_xlen": 198
+      },
+      {
+        "time_s": 10.51,
+        "backlog_xlen": 192
+      },
+      {
+        "time_s": 10.71,
+        "backlog_xlen": 186
+      },
+      {
+        "time_s": 10.91,
+        "backlog_xlen": 180
+      },
+      {
+        "time_s": 11.12,
+        "backlog_xlen": 172
+      },
+      {
+        "time_s": 11.32,
+        "backlog_xlen": 166
+      },
+      {
+        "time_s": 11.54,
+        "backlog_xlen": 160
+      },
+      {
+        "time_s": 11.76,
+        "backlog_xlen": 154
+      },
+      {
+        "time_s": 11.98,
+        "backlog_xlen": 146
+      },
+      {
+        "time_s": 12.18,
+        "backlog_xlen": 140
+      },
+      {
+        "time_s": 12.37,
+        "backlog_xlen": 136
+      },
+      {
+        "time_s": 12.57,
+        "backlog_xlen": 130
+      },
+      {
+        "time_s": 12.77,
+        "backlog_xlen": 122
+      },
+      {
+        "time_s": 12.98,
+        "backlog_xlen": 118
+      },
+      {
+        "time_s": 13.18,
+        "backlog_xlen": 112
+      },
+      {
+        "time_s": 13.38,
+        "backlog_xlen": 106
+      },
+      {
+        "time_s": 13.6,
+        "backlog_xlen": 98
+      },
+      {
+        "time_s": 13.8,
+        "backlog_xlen": 92
+      },
+      {
+        "time_s": 14.01,
+        "backlog_xlen": 86
+      },
+      {
+        "time_s": 14.2,
+        "backlog_xlen": 81
+      },
+      {
+        "time_s": 14.39,
+        "backlog_xlen": 75
+      },
+      {
+        "time_s": 14.6,
+        "backlog_xlen": 67
+      },
+      {
+        "time_s": 14.82,
+        "backlog_xlen": 59
+      },
+      {
+        "time_s": 15.03,
+        "backlog_xlen": 53
+      },
+      {
+        "time_s": 15.24,
+        "backlog_xlen": 45
+      },
+      {
+        "time_s": 15.45,
+        "backlog_xlen": 39
+      },
+      {
+        "time_s": 15.66,
+        "backlog_xlen": 31
+      },
+      {
+        "time_s": 15.87,
+        "backlog_xlen": 25
+      },
+      {
+        "time_s": 16.09,
+        "backlog_xlen": 18
+      },
+      {
+        "time_s": 16.29,
+        "backlog_xlen": 11
+      },
+      {
+        "time_s": 16.49,
+        "backlog_xlen": 6
+      },
+      {
+        "time_s": 16.7,
+        "backlog_xlen": 3
+      },
+      {
+        "time_s": 16.92,
+        "backlog_xlen": 0
+      }
+    ]
+  },
+  "run3_quad_workers": {
+    "run_name": "Run 3 (Quad Workers)",
+    "worker_count": 4,
+    "total_requests": 500,
+    "expected_spans": 50000,
+    "verified_db_spans": 50000,
+    "duplicate_spans": 0,
+    "api_wall_time_s": 6.033325100004731,
+    "worker_active_drain_s": 9.02212889999646,
+    "total_e2e_drain_s": 9.773091700000805,
+    "worker_active_throughput_spans_s": 5541.929244661936,
+    "e2e_throughput_spans_s": 5116.088289644912,
+    "client_latencies_ms": {
+      "mean": 115.98052039995673,
+      "p50": 102.10480000023381,
+      "p95": 197.23903500198483,
+      "p99": 319.365941994838
+    },
+    "gateway_metrics": {
+      "total_requests": 500,
+      "t_api_parse": {
+        "count": 500,
+        "min_ms": 0.29240000003483146,
+        "mean_ms": 1.130630999992718,
+        "p50_ms": 1.0601999965729192,
+        "p95_ms": 1.8861999997170642,
+        "p99_ms": 2.6376999958301894,
+        "max_ms": 29.166199994506314
+      },
+      "t_api_serialize": {
+        "count": 500,
+        "min_ms": 0.0777000022935681,
+        "mean_ms": 0.264253999790526,
+        "p50_ms": 0.2734000008786097,
+        "p95_ms": 0.3910000014002435,
+        "p99_ms": 0.4961000013281591,
+        "max_ms": 0.8863999973982573
+      },
+      "t_api_redis_xadd": {
+        "count": 500,
+        "min_ms": 42.10859999875538,
+        "mean_ms": 46.17115399990871,
+        "p50_ms": 45.511700001952704,
+        "p95_ms": 50.87730000377633,
+        "p99_ms": 58.04860000353074,
+        "max_ms": 73.7548999968567
+      }
+    },
+    "worker_metrics": {
+      "worker-1": {
+        "consumer_name": "worker-1",
+        "messages_processed": 129,
+        "spans_persisted": 12900,
+        "first_batch_time": 45477.3201256,
+        "last_batch_time": 45485.8588403,
+        "active_drain_seconds": 8.538714700000128,
+        "messages_per_sec": 15.10766017278901,
+        "spans_per_sec": 1510.766017278901,
+        "t_fetch": {
+          "count": 7,
+          "mean_ms": 18.120028571242333,
+          "p50_ms": 8.46820000151638,
+          "p95_ms": 78.57070000318345,
+          "p99_ms": 78.57070000318345,
+          "max_ms": 78.57070000318345
+        },
+        "t_parse": {
+          "count": 129,
+          "mean_ms": 0.7723550385093433,
+          "p50_ms": 0.7157000000006519,
+          "p95_ms": 1.2013000014121644,
+          "p99_ms": 1.3697000031243078,
+          "max_ms": 2.1627000023727305
+        },
+        "t_db": {
+          "count": 129,
+          "mean_ms": 62.2163728683715,
+          "p50_ms": 60.87169999955222,
+          "p95_ms": 67.56880000466481,
+          "p99_ms": 124.2119000016828,
+          "max_ms": 150.13159999944037
+        },
+        "t_ack": {
+          "count": 129,
+          "mean_ms": 3.5138131785878817,
+          "p50_ms": 3.6051999995834194,
+          "p95_ms": 4.924499997287057,
+          "p99_ms": 6.174399997689761,
+          "max_ms": 6.611999997403473
+        },
+        "t_3a_pool_acquire": {
+          "count": 129,
+          "mean_ms": 0.054600000344920734,
+          "p50_ms": 0.04940000508213416,
+          "p95_ms": 0.08969999908003956,
+          "p99_ms": 0.1421999986632727,
+          "max_ms": 0.14419999934034422
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 129,
+          "mean_ms": 54.509214729026894,
+          "p50_ms": 53.50439999892842,
+          "p95_ms": 59.09120000433177,
+          "p99_ms": 61.57369999709772,
+          "max_ms": 141.82050000090385
+        },
+        "t_3b_sql_execute": {
+          "count": 129,
+          "mean_ms": 54.509214729026894,
+          "p50_ms": 53.50439999892842,
+          "p95_ms": 59.09120000433177,
+          "p99_ms": 61.57369999709772,
+          "max_ms": 141.82050000090385
+        },
+        "t_3c_transaction_commit": {
+          "count": 129,
+          "mean_ms": 4.005814728369059,
+          "p50_ms": 3.5061000016867183,
+          "p95_ms": 5.522999999811873,
+          "p99_ms": 6.84470000123838,
+          "max_ms": 61.38260000443552
+        },
+        "t_3c_wal_commit": {
+          "count": 129,
+          "mean_ms": 4.005814728369059,
+          "p50_ms": 3.5061000016867183,
+          "p95_ms": 5.522999999811873,
+          "p99_ms": 6.84470000123838,
+          "max_ms": 61.38260000443552
+        }
+      },
+      "worker-2": {
+        "consumer_name": "worker-2",
+        "messages_processed": 134,
+        "spans_persisted": 13400,
+        "first_batch_time": 45477.3221567,
+        "last_batch_time": 45486.3422545,
+        "active_drain_seconds": 9.020097799999348,
+        "messages_per_sec": 14.85571475732887,
+        "spans_per_sec": 1485.5714757328872,
+        "t_fetch": {
+          "count": 7,
+          "mean_ms": 22.155942858911917,
+          "p50_ms": 15.969600004609674,
+          "p95_ms": 78.66630000353325,
+          "p99_ms": 78.66630000353325,
+          "max_ms": 78.66630000353325
+        },
+        "t_parse": {
+          "count": 134,
+          "mean_ms": 0.8055134325087551,
+          "p50_ms": 0.7862000056775287,
+          "p95_ms": 1.2430999995558523,
+          "p99_ms": 1.6600999952061102,
+          "max_ms": 1.8174999931943603
+        },
+        "t_db": {
+          "count": 134,
+          "mean_ms": 63.05570970142804,
+          "p50_ms": 61.75900000380352,
+          "p95_ms": 71.04529999924125,
+          "p99_ms": 100.31940000044415,
+          "max_ms": 152.56200000294484
+        },
+        "t_ack": {
+          "count": 134,
+          "mean_ms": 3.548896268960141,
+          "p50_ms": 3.6155999987386167,
+          "p95_ms": 4.629099996236619,
+          "p99_ms": 5.244800006039441,
+          "max_ms": 5.713999998988584
+        },
+        "t_3a_pool_acquire": {
+          "count": 134,
+          "mean_ms": 0.057402238794498205,
+          "p50_ms": 0.054100004490464926,
+          "p95_ms": 0.08769999840296805,
+          "p99_ms": 0.14479999663308263,
+          "max_ms": 0.15970000094966963
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 134,
+          "mean_ms": 54.887229104312624,
+          "p50_ms": 53.748299993458204,
+          "p95_ms": 59.72509999992326,
+          "p99_ms": 70.48959999519866,
+          "max_ms": 143.71209999808343
+        },
+        "t_3b_sql_execute": {
+          "count": 134,
+          "mean_ms": 54.887229104312624,
+          "p50_ms": 53.748299993458204,
+          "p95_ms": 59.72509999992326,
+          "p99_ms": 70.48959999519866,
+          "max_ms": 143.71209999808343
+        },
+        "t_3c_transaction_commit": {
+          "count": 134,
+          "mean_ms": 4.265908209203896,
+          "p50_ms": 3.4781000067596324,
+          "p95_ms": 8.078300001216121,
+          "p99_ms": 13.634499999170657,
+          "max_ms": 44.60280000057537
+        },
+        "t_3c_wal_commit": {
+          "count": 134,
+          "mean_ms": 4.265908209203896,
+          "p50_ms": 3.4781000067596324,
+          "p95_ms": 8.078300001216121,
+          "p99_ms": 13.634499999170657,
+          "max_ms": 44.60280000057537
+        }
+      },
+      "worker-3": {
+        "consumer_name": "worker-3",
+        "messages_processed": 121,
+        "spans_persisted": 12100,
+        "first_batch_time": 45477.327036,
+        "last_batch_time": 45485.5434422,
+        "active_drain_seconds": 8.216406200001074,
+        "messages_per_sec": 14.726633159882502,
+        "spans_per_sec": 1472.6633159882501,
+        "t_fetch": {
+          "count": 12,
+          "mean_ms": 13.030416667485648,
+          "p50_ms": 5.234900003415532,
+          "p95_ms": 81.56359999702545,
+          "p99_ms": 81.56359999702545,
+          "max_ms": 81.56359999702545
+        },
+        "t_parse": {
+          "count": 121,
+          "mean_ms": 0.810675206173246,
+          "p50_ms": 0.7931999934953637,
+          "p95_ms": 1.175800003693439,
+          "p99_ms": 1.31899999541929,
+          "max_ms": 1.7310000039287843
+        },
+        "t_db": {
+          "count": 121,
+          "mean_ms": 63.43588512408892,
+          "p50_ms": 61.62619999668095,
+          "p95_ms": 71.75049999932526,
+          "p99_ms": 125.31959999614628,
+          "max_ms": 152.76389999780804
+        },
+        "t_ack": {
+          "count": 121,
+          "mean_ms": 3.6393685944302367,
+          "p50_ms": 3.5708999930648133,
+          "p95_ms": 4.84380000125384,
+          "p99_ms": 6.435399998736102,
+          "max_ms": 9.393199994519819
+        },
+        "t_3a_pool_acquire": {
+          "count": 121,
+          "mean_ms": 0.05756446265246073,
+          "p50_ms": 0.05370000144466758,
+          "p95_ms": 0.09409999620402232,
+          "p99_ms": 0.13269999908516183,
+          "max_ms": 0.13490000128513202
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 121,
+          "mean_ms": 55.15405289247422,
+          "p50_ms": 53.96979999932228,
+          "p95_ms": 60.129900004540104,
+          "p99_ms": 70.22230000438867,
+          "max_ms": 143.46360000490677
+        },
+        "t_3b_sql_execute": {
+          "count": 121,
+          "mean_ms": 55.15405289247422,
+          "p50_ms": 53.96979999932228,
+          "p95_ms": 60.129900004540104,
+          "p99_ms": 70.22230000438867,
+          "max_ms": 143.46360000490677
+        },
+        "t_3c_transaction_commit": {
+          "count": 121,
+          "mean_ms": 4.413763636086725,
+          "p50_ms": 3.4992000000784174,
+          "p95_ms": 6.321900000330061,
+          "p99_ms": 36.13290000066627,
+          "max_ms": 67.34590000269236
+        },
+        "t_3c_wal_commit": {
+          "count": 121,
+          "mean_ms": 4.413763636086725,
+          "p50_ms": 3.4992000000784174,
+          "p95_ms": 6.321900000330061,
+          "p99_ms": 36.13290000066627,
+          "max_ms": 67.34590000269236
+        }
+      },
+      "worker-4": {
+        "consumer_name": "worker-4",
+        "messages_processed": 116,
+        "spans_persisted": 11600,
+        "first_batch_time": 45477.3285742,
+        "last_batch_time": 45485.1387446,
+        "active_drain_seconds": 7.810170400000061,
+        "messages_per_sec": 14.85242882792917,
+        "spans_per_sec": 1485.242882792917,
+        "t_fetch": {
+          "count": 9,
+          "mean_ms": 17.879566666023393,
+          "p50_ms": 5.123399998410605,
+          "p95_ms": 78.38339999580057,
+          "p99_ms": 78.38339999580057,
+          "max_ms": 78.38339999580057
+        },
+        "t_parse": {
+          "count": 116,
+          "mean_ms": 0.8096249994509732,
+          "p50_ms": 0.8020999957807362,
+          "p95_ms": 1.1345000020810403,
+          "p99_ms": 1.4328999968711287,
+          "max_ms": 1.9500000053085387
+        },
+        "t_db": {
+          "count": 116,
+          "mean_ms": 63.00646034469537,
+          "p50_ms": 61.66149999626214,
+          "p95_ms": 74.06769999943208,
+          "p99_ms": 100.49440000148024,
+          "max_ms": 157.9236999968998
+        },
+        "t_ack": {
+          "count": 116,
+          "mean_ms": 3.589878448173263,
+          "p50_ms": 3.6744000026374124,
+          "p95_ms": 4.499900001974311,
+          "p99_ms": 5.923800003074575,
+          "max_ms": 5.9268000040901825
+        },
+        "t_3a_pool_acquire": {
+          "count": 116,
+          "mean_ms": 0.05820172429656818,
+          "p50_ms": 0.05750000127591193,
+          "p95_ms": 0.08779999916441739,
+          "p99_ms": 0.10699999984353781,
+          "max_ms": 0.10869999823626131
+        },
+        "t_3b_sql_fetch_execute": {
+          "count": 116,
+          "mean_ms": 55.005486207125514,
+          "p50_ms": 53.91609999787761,
+          "p95_ms": 62.014300005102996,
+          "p99_ms": 68.94610000017565,
+          "max_ms": 148.17949999996927
+        },
+        "t_3b_sql_execute": {
+          "count": 116,
+          "mean_ms": 55.005486207125514,
+          "p50_ms": 53.91609999787761,
+          "p95_ms": 62.014300005102996,
+          "p99_ms": 68.94610000017565,
+          "max_ms": 148.17949999996927
+        },
+        "t_3c_transaction_commit": {
+          "count": 116,
+          "mean_ms": 4.057206034774246,
+          "p50_ms": 3.5649999990710057,
+          "p95_ms": 6.467400002293289,
+          "p99_ms": 13.354499998968095,
+          "max_ms": 41.180699998221826
+        },
+        "t_3c_wal_commit": {
+          "count": 116,
+          "mean_ms": 4.057206034774246,
+          "p50_ms": 3.5649999990710057,
+          "p95_ms": 6.467400002293289,
+          "p99_ms": 13.354499998968095,
+          "max_ms": 41.180699998221826
+        }
+      }
+    },
+    "workload_balance": {
+      "worker-1": {
+        "batches": 129,
+        "spans": 12900,
+        "share_pct": 25.8
+      },
+      "worker-2": {
+        "batches": 134,
+        "spans": 13400,
+        "share_pct": 26.8
+      },
+      "worker-3": {
+        "batches": 121,
+        "spans": 12100,
+        "share_pct": 24.2
+      },
+      "worker-4": {
+        "batches": 116,
+        "spans": 11600,
+        "share_pct": 23.2
+      }
+    },
+    "aggregate_worker_metrics": {
+      "t_fetch": {
+        "count": 35,
+        "mean_ms": 17.120368571860517,
+        "p50_ms": 7.99982857341612,
+        "p95_ms": 79.56779428495793,
+        "p99_ms": 79.56779428495793,
+        "max_ms": 81.56359999702545
+      },
+      "t_parse": {
+        "count": 500,
+        "mean_ms": 0.7991615996143082,
+        "p50_ms": 0.7733937989687547,
+        "p95_ms": 1.1908338016219204,
+        "p99_ms": 1.449920197686879,
+        "max_ms": 2.1627000023727305
+      },
+      "t_db": {
+        "count": 500,
+        "mean_ms": 62.919737400021404,
+        "p50_ms": 61.47531899923342,
+        "p95_ms": 71.02021820070513,
+        "p99_ms": 112.57431339996401,
+        "max_ms": 157.9236999968998
+      },
+      "t_ack": {
+        "count": 500,
+        "mean_ms": 3.5712469999853056,
+        "p50_ms": 3.615740998488036,
+        "p95_ms": 4.727296199052944,
+        "p99_ms": 5.930290001429967,
+        "max_ms": 9.393199994519819
+      },
+      "t_3a_pool_acquire": {
+        "count": 500,
+        "mean_ms": 0.05690400008461438,
+        "p50_ms": 0.053579403160256334,
+        "p95_ms": 0.08978799822216388,
+        "p99_ms": 0.13243139849510044,
+        "max_ms": 0.15970000094966963
+      },
+      "t_3b_sql_fetch_execute": {
+        "count": 500,
+        "mean_ms": 54.881708400076604,
+        "p50_ms": 53.77790639731393,
+        "p95_ms": 60.19060980337963,
+        "p99_ms": 67.76651919906726,
+        "max_ms": 148.17949999996927
+      },
+      "t_3b_sql_execute": {
+        "count": 500,
+        "mean_ms": 54.881708400076604,
+        "p50_ms": 53.77790639731393,
+        "p95_ms": 60.19060980337963,
+        "p99_ms": 67.76651919906726,
+        "max_ms": 148.17949999996927
+      },
+      "t_3c_transaction_commit": {
+        "count": 500,
+        "mean_ms": 4.186166199986474,
+        "p50_ms": 3.510591002050205,
+        "p95_ms": 6.620255000889301,
+        "p99_ms": 17.262384400019073,
+        "max_ms": 67.34590000269236
+      },
+      "t_3c_wal_commit": {
+        "count": 500,
+        "mean_ms": 4.186166199986474,
+        "p50_ms": 3.510591002050205,
+        "p95_ms": 6.620255000889301,
+        "p99_ms": 17.262384400019073,
+        "max_ms": 67.34590000269236
+      }
+    },
+    "queue_progression": [
+      {
+        "time_s": 0.17,
+        "backlog_xlen": 0
+      },
+      {
+        "time_s": 0.38,
+        "backlog_xlen": 10
+      },
+      {
+        "time_s": 0.58,
+        "backlog_xlen": 15
+      },
+      {
+        "time_s": 0.78,
+        "backlog_xlen": 23
+      },
+      {
+        "time_s": 0.99,
+        "backlog_xlen": 33
+      },
+      {
+        "time_s": 1.21,
+        "backlog_xlen": 42
+      },
+      {
+        "time_s": 1.47,
+        "backlog_xlen": 40
+      },
+      {
+        "time_s": 1.77,
+        "backlog_xlen": 42
+      },
+      {
+        "time_s": 2.01,
+        "backlog_xlen": 46
+      },
+      {
+        "time_s": 2.25,
+        "backlog_xlen": 59
+      },
+      {
+        "time_s": 2.48,
+        "backlog_xlen": 65
+      },
+      {
+        "time_s": 2.71,
+        "backlog_xlen": 66
+      },
+      {
+        "time_s": 2.92,
+        "backlog_xlen": 68
+      },
+      {
+        "time_s": 3.13,
+        "backlog_xlen": 74
+      },
+      {
+        "time_s": 3.32,
+        "backlog_xlen": 81
+      },
+      {
+        "time_s": 3.52,
+        "backlog_xlen": 90
+      },
+      {
+        "time_s": 3.73,
+        "backlog_xlen": 98
+      },
+      {
+        "time_s": 3.97,
+        "backlog_xlen": 111
+      },
+      {
+        "time_s": 4.18,
+        "backlog_xlen": 116
+      },
+      {
+        "time_s": 4.39,
+        "backlog_xlen": 124
+      },
+      {
+        "time_s": 4.6,
+        "backlog_xlen": 128
+      },
+      {
+        "time_s": 4.81,
+        "backlog_xlen": 139
+      },
+      {
+        "time_s": 5.01,
+        "backlog_xlen": 145
+      },
+      {
+        "time_s": 5.22,
+        "backlog_xlen": 149
+      },
+      {
+        "time_s": 5.46,
+        "backlog_xlen": 158
+      },
+      {
+        "time_s": 5.7,
+        "backlog_xlen": 164
+      },
+      {
+        "time_s": 5.91,
+        "backlog_xlen": 171
+      },
+      {
+        "time_s": 6.12,
+        "backlog_xlen": 170
+      },
+      {
+        "time_s": 6.32,
+        "backlog_xlen": 155
+      },
+      {
+        "time_s": 6.53,
+        "backlog_xlen": 142
+      },
+      {
+        "time_s": 6.72,
+        "backlog_xlen": 131
+      },
+      {
+        "time_s": 6.92,
+        "backlog_xlen": 117
+      },
+      {
+        "time_s": 7.12,
+        "backlog_xlen": 103
+      },
+      {
+        "time_s": 7.33,
+        "backlog_xlen": 91
+      },
+      {
+        "time_s": 7.55,
+        "backlog_xlen": 79
+      },
+      {
+        "time_s": 7.74,
+        "backlog_xlen": 67
+      },
+      {
+        "time_s": 7.95,
+        "backlog_xlen": 51
+      },
+      {
+        "time_s": 8.16,
+        "backlog_xlen": 39
+      },
+      {
+        "time_s": 8.36,
+        "backlog_xlen": 29
+      },
+      {
+        "time_s": 8.56,
+        "backlog_xlen": 20
+      },
+      {
+        "time_s": 8.76,
+        "backlog_xlen": 13
+      },
+      {
+        "time_s": 8.97,
+        "backlog_xlen": 7
+      },
+      {
+        "time_s": 9.19,
+        "backlog_xlen": 4
+      },
+      {
+        "time_s": 9.39,
+        "backlog_xlen": 1
+      },
+      {
+        "time_s": 9.59,
+        "backlog_xlen": 0
+      }
+    ]
+  },
+  "scaling_summary": {
+    "throughput_delta_1_to_2_pct": 101.75,
+    "throughput_delta_2_to_4_pct": 82.75,
+    "throughput_delta_1_to_4_pct": 268.69,
+    "drain_time_reduction_1_to_2_pct": 50.43,
+    "drain_time_reduction_2_to_4_pct": 45.28,
+    "drain_time_reduction_1_to_4_pct": 72.88
+  }
+}

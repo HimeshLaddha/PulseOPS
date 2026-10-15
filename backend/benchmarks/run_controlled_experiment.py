@@ -24,6 +24,11 @@ RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
+BENCHMARK_STREAM_KEY = "telemetry:stream:benchmark"
+BENCHMARK_CONSUMER_GROUP = "pulseops-benchmark-group"
+BENCHMARK_DLQ_KEY = f"{BENCHMARK_STREAM_KEY}:deadletter"
+
+
 def calculate_percentile(sorted_values: List[float], p: float) -> float:
     if not sorted_values:
         return 0.0
@@ -93,28 +98,36 @@ async def run_workload_run(
         assert health.status_code == 200, "API is unhealthy"
         await client.post("/v1/telemetry/profiling/reset")
 
+    # Safe isolated Redis stream cleanup: ONLY reset dedicated benchmark stream & DLQ.
+    # NEVER touch or clear the application's default telemetry:stream.
     r_clean = aioredis.from_url(settings.redis_url, decode_responses=True)
-    # Clear the test stream before each run (XTRIM telemetry:stream MAXLEN 0)
     try:
-        await r_clean.xtrim(settings.REDIS_STREAM_KEY, maxlen=0)
-    except Exception:
-        pass
-    try:
-        await r_clean.delete(f"{settings.REDIS_STREAM_KEY}:deadletter")
-    except Exception:
-        pass
-    try:
-        await r_clean.xgroup_create(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, id="0", mkstream=True)
-    except Exception:
-        try:
-            await r_clean.xgroup_setid(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, id="0")
-        except Exception:
-            pass
-    await r_clean.aclose()
+        await r_clean.delete(BENCHMARK_STREAM_KEY)
+        await r_clean.delete(BENCHMARK_DLQ_KEY)
+        await r_clean.xgroup_create(
+            BENCHMARK_STREAM_KEY,
+            BENCHMARK_CONSUMER_GROUP,
+            id="0",
+            mkstream=True,
+        )
+    except Exception as e:
+        print(f"ERROR: Benchmark Redis setup failed on {BENCHMARK_STREAM_KEY}: {e}", file=sys.stderr)
+        raise RuntimeError(f"Failed to initialize isolated benchmark stream {BENCHMARK_STREAM_KEY}: {e}") from e
+    finally:
+        await r_clean.aclose()
 
+    # Scoped database cleanup: strictly delete records for this benchmark run's service_name
     pg_clean = await asyncpg.connect(settings.database_url)
-    await pg_clean.execute(f"DELETE FROM spans WHERE service_name = '{service_name}';")
-    await pg_clean.close()
+    try:
+        await pg_clean.execute(
+            "DELETE FROM spans WHERE service_name = $1;",
+            service_name,
+        )
+    except Exception as e:
+        print(f"ERROR: Benchmark DB cleanup failed for {service_name}: {e}", file=sys.stderr)
+        raise RuntimeError(f"Failed to clean benchmark spans for {service_name}: {e}") from e
+    finally:
+        await pg_clean.close()
 
     # Clear old profiling files for these workers
     for w_name in worker_names:
@@ -125,7 +138,7 @@ async def run_workload_run(
     if os.path.exists(single_file):
         os.remove(single_file)
 
-    # 2. Launch Worker Processes
+    # 2. Launch Worker Processes with isolated benchmark stream & group
     worker_procs: List[Tuple[subprocess.Popen, Any]] = []
     for w_name in worker_names:
         log_path = os.path.join(RESULTS_DIR, f"worker_{w_name}.log")
@@ -136,6 +149,8 @@ async def run_workload_run(
             os.path.join(BACKEND_DIR, "app", "worker.py"),
             "--loop",
             "--consumer-name", w_name,
+            "--stream-key", BENCHMARK_STREAM_KEY,
+            "--group-name", BENCHMARK_CONSUMER_GROUP,
             "--batch-size", "50",
             "--block-ms", "200",
         ]
@@ -152,21 +167,23 @@ async def run_workload_run(
     async def track_queue():
         r_track = aioredis.from_url(settings.redis_url, decode_responses=True)
         t0 = time.perf_counter()
-        while tracking:
-            try:
-                xlen = await r_track.xlen(settings.REDIS_STREAM_KEY)
-                queue_samples.append({
-                    "time_s": round(time.perf_counter() - t0, 2),
-                    "backlog_xlen": xlen,
-                })
-            except Exception:
-                pass
-            await asyncio.sleep(0.2)
-        await r_track.aclose()
+        try:
+            while tracking:
+                try:
+                    xlen = await r_track.xlen(BENCHMARK_STREAM_KEY)
+                    queue_samples.append({
+                        "time_s": round(time.perf_counter() - t0, 2),
+                        "backlog_xlen": xlen,
+                    })
+                except Exception:
+                    pass
+                await asyncio.sleep(0.2)
+        finally:
+            await r_track.aclose()
 
     tracker_task = asyncio.create_task(track_queue())
 
-    # 4. Ingest Requests
+    # 4. Ingest Requests into isolated benchmark stream
     limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
     timeout = httpx.Timeout(30.0, connect=10.0)
     sem = asyncio.Semaphore(concurrency)
@@ -180,7 +197,10 @@ async def run_workload_run(
             payload = generate_span_batch(service_name, spans_per_req, trace_id)
             async with sem:
                 t0 = time.perf_counter()
-                resp = await client.post("/v1/telemetry/spans?mode=stream", json=payload)
+                resp = await client.post(
+                    f"/v1/telemetry/spans?mode=stream&stream_key={BENCHMARK_STREAM_KEY}",
+                    json=payload,
+                )
                 t_elapsed = (time.perf_counter() - t0) * 1000.0
                 assert resp.status_code == 202
                 latencies.append(t_elapsed)
@@ -191,24 +211,29 @@ async def run_workload_run(
 
     print(f"[API INGEST COMPLETE] {total_requests} requests accepted in {api_wall_time:.3f} s ({expected_spans / api_wall_time:.1f} spans/s)")
 
-    # 5. Monitor Stream Drain
+    # 5. Monitor Stream Drain on isolated benchmark stream & group
     print(f"[DRAIN] Monitoring stream drain until queue depth = 0 and DB = {expected_spans:,} spans ...")
     r_drain = aioredis.from_url(settings.redis_url, decode_responses=True)
     pg_conn = await asyncpg.connect(settings.database_url)
 
-    drain_start = time.perf_counter()
-    timeout_s = 90.0
+    try:
+        drain_start = time.perf_counter()
+        timeout_s = 90.0
 
-    while (time.perf_counter() - drain_start) < timeout_s:
-        xlen = await r_drain.xlen(settings.REDIS_STREAM_KEY)
-        p_info = await r_drain.xpending(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP)
-        pending = p_info["pending"] if isinstance(p_info, dict) else p_info[0]
-        db_count = await pg_conn.fetchval(
-            f"SELECT count(*) FROM spans WHERE service_name = '{service_name}';"
-        )
-        if xlen == 0 and pending == 0 and db_count >= expected_spans:
-            break
-        await asyncio.sleep(0.3)
+        while (time.perf_counter() - drain_start) < timeout_s:
+            xlen = await r_drain.xlen(BENCHMARK_STREAM_KEY)
+            p_info = await r_drain.xpending(BENCHMARK_STREAM_KEY, BENCHMARK_CONSUMER_GROUP)
+            pending = p_info["pending"] if isinstance(p_info, dict) else p_info[0]
+            db_count = await pg_conn.fetchval(
+                "SELECT count(*) FROM spans WHERE service_name = $1;",
+                service_name,
+            )
+            if xlen == 0 and pending == 0 and db_count >= expected_spans:
+                break
+            await asyncio.sleep(0.3)
+    finally:
+        await r_drain.aclose()
+        await pg_conn.close()
 
     queue_empty_time = time.perf_counter()
     total_e2e_drain_time = queue_empty_time - ingest_start_time
@@ -216,8 +241,6 @@ async def run_workload_run(
 
     tracking = False
     await tracker_task
-    await r_drain.aclose()
-    await pg_conn.close()
 
     print(f"[DRAIN COMPLETE] Total End-to-End Drain Time: {total_e2e_drain_time:.3f} s (Wait after API: {wait_after_api_time:.3f} s)")
 
@@ -283,15 +306,19 @@ async def run_workload_run(
         else 0.0
     )
 
-    # 9. Verify Database Correctness
+    # 9. Verify Database Correctness (scoped to benchmark service_name)
     pg_check = await asyncpg.connect(settings.database_url)
-    verified_db_count = await pg_check.fetchval(
-        f"SELECT count(*) FROM spans WHERE service_name = '{service_name}';"
-    )
-    duplicate_count = await pg_check.fetchval(
-        f"SELECT count(*) - count(DISTINCT (trace_id, span_id)) FROM spans WHERE service_name = '{service_name}';"
-    )
-    await pg_check.close()
+    try:
+        verified_db_count = await pg_check.fetchval(
+            "SELECT count(*) FROM spans WHERE service_name = $1;",
+            service_name,
+        )
+        duplicate_count = await pg_check.fetchval(
+            "SELECT count(*) - count(DISTINCT (trace_id, span_id)) FROM spans WHERE service_name = $1;",
+            service_name,
+        )
+    finally:
+        await pg_check.close()
 
     assert verified_db_count == expected_spans, f"Expected {expected_spans} rows, found {verified_db_count}!"
     assert duplicate_count == 0, f"Found {duplicate_count} duplicate spans!"
@@ -491,12 +518,16 @@ async def main():
 
     print("\n" + "=" * 96)
     print("SCALING EFFICIENCY & SPEEDUP ANALYSIS")
+    print("Formula: Efficiency = (Speedup - 1) / (Worker_Count - 1) * 100")
     print("=" * 96)
     print(f"{'Transition':<24} | {'Throughput Delta':<20} | {'Drain Time Reduction':<22} | {'Scaling Efficiency':<20}")
     print("-" * 96)
-    eff_1_to_2 = (delta_tp_1_to_2 / 100.0) * 100.0  # ideal is 100% boost for 2x workers
-    eff_2_to_4 = (delta_tp_2_to_4 / 100.0) * 100.0  # ideal is 100% boost for 2x workers
-    eff_1_to_4 = (delta_tp_1_to_4 / 300.0) * 100.0  # ideal is 300% boost for 4x workers
+    speedup_1_to_2 = tp2 / tp1 if tp1 > 0 else 0.0
+    speedup_2_to_4 = tp3 / tp2 if tp2 > 0 else 0.0
+    speedup_1_to_4 = tp3 / tp1 if tp1 > 0 else 0.0
+    eff_1_to_2 = ((speedup_1_to_2 - 1.0) / (2 - 1)) * 100.0
+    eff_2_to_4 = ((speedup_2_to_4 - 1.0) / (2 - 1)) * 100.0  # 2x worker scaling
+    eff_1_to_4 = ((speedup_1_to_4 - 1.0) / (4 - 1)) * 100.0  # 1 to 4 worker scaling
     print(f"{'1 -> 2 Workers':<24} | {delta_tp_1_to_2:+6.1f}% throughput    | {delta_d_1_to_2:6.1f}% time reduction   | {eff_1_to_2:5.1f}% of linear ideal")
     print(f"{'2 -> 4 Workers':<24} | {delta_tp_2_to_4:+6.1f}% throughput    | {delta_d_2_to_4:6.1f}% time reduction   | {eff_2_to_4:5.1f}% of linear ideal")
     print(f"{'1 -> 4 Workers (Overall)':<24} | {delta_tp_1_to_4:+6.1f}% throughput    | {delta_d_1_to_4:6.1f}% time reduction   | {eff_1_to_4:5.1f}% of linear ideal")

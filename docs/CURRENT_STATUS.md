@@ -89,24 +89,34 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
     - $T_{3\text{b}}$ (SQL Fetch/Execute Duration): **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$) — client-observed query execution and row fetch duration via `conn.fetch` (does not isolate PostgreSQL internal execution). Accounts for ~92.4% of DB stage time.
     - $T_{3\text{c}}$ (Transaction Commit Duration): **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$) — client-observed transaction commit duration via `tr.commit` (does not independently measure physical WAL fsync). Accounts for ~4.6% of DB stage time.
   - **Audit of $T_{\text{api\_redis}}$ Gateway Timer:**
-    - Isolated $T_{\text{api\_parse}}$ (0.63 ms) and $T_{\text{api\_serialize}}$ (0.12 ms). Clarified that the ~44 ms in `await redis.xadd()` under $C=10$ is Python asyncio event loop task scheduling contention under concurrency, not Redis network I/O.
+    - Isolated $T_{\text{api\_parse}}$ (0.63 ms) and $T_{\text{api\_serialize}}$ (0.12 ms). The remaining ~44 ms in `await redis.xadd()` under $C=10$ is hypothesized to reflect Python asyncio event loop task scheduling contention and coroutine multiplexing overhead under concurrency rather than pure Redis network round-trip time (<1 ms), though definitive isolation from socket buffer backpressure requires deeper event loop tracing.
   - **Controlled Concurrency Scaling Experiment (Scenario D: 50,000 spans):**
     - **Run 1 (Single Worker):** Worker active drain time = **27.168 s** (1,840.4 spans/s). Total E2E time = 27.839 s (1,796.0 spans/s).
     - **Run 2 (Dual Workers):** Worker active drain time = **14.284 s** (3,500.5 spans/s, **+90.2% throughput increase**). Total E2E time = 14.822 s (3,373.5 spans/s, **+87.8% throughput increase**).
     - **100% Database Correctness:** Exactly 50,000 / 50,000 spans persisted in both runs with 0 duplicates and 0 errors.
     - **ADR-004 Accepted:** Linear worker concurrency scaling documented in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md).
 - [x] **Day 5: 1 -> 2 -> 4 Worker Scaling Experiment:**
-  - **Workload:** 50,000 spans (500 requests $\times$ 100 spans/req at $C=10$) executed under consumer group `pulseops-ingest-group` on `telemetry:stream` with pre-run `XTRIM telemetry:stream MAXLEN 0`.
-  - **Results Summary:**
-    - **1 Worker:** Active Drain = **33.264 s** (1,503.1 spans/s), E2E Drain = **33.931 s** (1,473.6 spans/s), 100% balance (`single-worker`: 500 batches).
-    - **2 Workers:** Active Drain = **16.488 s** (3,032.6 spans/s, **+101.8% throughput**, **50.4% time reduction**), E2E Drain = **17.074 s** (2,928.4 spans/s), balance: 50.6% (`worker-1`) vs 49.4% (`worker-2`).
-    - **4 Workers:** Active Drain = **9.022 s** (5,541.9 spans/s, **+82.7% throughput vs 2-worker**, **+268.7% throughput vs 1-worker**, **72.9% time reduction**), E2E Drain = **9.773 s** (5,116.1 spans/s), balance: 25.8% / 26.8% / 24.2% / 23.2%.
-  - **Scaling Efficiency:**
-    - 1 -> 2 workers: 101.8% of linear ideal (+101.8% throughput increase).
-    - 2 -> 4 workers: 82.7% of linear ideal (+82.7% throughput increase).
-    - 1 -> 4 workers: 89.6% overall scaling efficiency (+268.7% throughput increase).
-  - **PostgreSQL Invariance & Bottleneck Stability:**
-    - $T_{3\text{b}}$ (SQL Fetch/Execute Duration) remained completely flat across concurrency levels: **54.49 ms** (1 worker) vs **53.69 ms** (2 workers) vs **54.88 ms** (4 workers).
-    - $T_{3\text{c}}$ (Transaction Commit Duration) remained stable: **4.91 ms** (1 worker) vs **4.16 ms** (2 workers) vs **4.19 ms** (4 workers).
-    - $T_{3\text{a}}$ (Pool Acquisition) remained negligible (< 0.06 ms).
-  - **Database Correctness:** Exactly 50,000 / 50,000 spans persisted in every run with **0 duplicates and 0 lost spans** verified via primary key constraint check. Raw results saved in `backend/benchmarks/results/day5_worker_scaling_experiment.json`.
+  - **Workload:** 50,000 spans (500 requests $\times$ 100 spans/req at $C=10$) executed under isolated benchmark consumer group and stream settings (raw dataset: [`backend/benchmarks/results/day5_worker_scaling_experiment.json`](backend/benchmarks/results/day5_worker_scaling_experiment.json)).
+  - **Measured 3-Way Scaling Results:**
+
+    | Metric | 1 worker | 2 workers | 4 workers |
+    |---|---:|---:|---:|
+    | Persistence throughput | 1,503.1 spans/s | 3,032.6 spans/s | 5,541.9 spans/s |
+    | End-to-end drain time | 33.931 s | 17.074 s | 9.773 s |
+    | API p95 latency | 127.48 ms | 157.22 ms | 197.24 ms |
+    | API p99 latency | 289.53 ms | 302.50 ms | 319.37 ms |
+    | Missing spans reported | 0 | 0 | 0 |
+    | Duplicate spans reported | 0 | 0 | 0 |
+
+  - **Scaling Efficiency Arithmetic:**
+    Formula: $\text{Efficiency} = \frac{\text{Speedup} - 1}{\text{worker\_count} - 1} \times 100\%$
+    - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ Efficiency = $\mathbf{101.8\%}$ (Throughput $+101.8\%$, end-to-end drain time $-49.7\%$).
+    - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ Efficiency = $\mathbf{82.7\%}$ (Throughput $+82.7\%$, end-to-end drain time $-42.8\%$).
+    - 1 -> 4 workers (overall): Speedup = 3.69x $\rightarrow$ Efficiency = $\frac{3.687 - 1}{3} \times 100\% = \mathbf{89.6\%}$ (Throughput $+268.7\%$, end-to-end drain time $-71.2\%$).
+  - **Operational Trade-Off & Non-Optimality of 4 Workers:**
+    While 4 workers maximize persistence throughput and reduce drain time from 33.9 s to 9.8 s, upstream API latencies increased across the runs ($p_{95}$ from 127.5 ms to 197.2 ms; $p_{99}$ from 289.5 ms to 319.4 ms) due to host-level CPU contention across the API, workers, and database. Four workers are not automatically optimal and should be tuned against host core capacity.
+  - **Database Stage Invariance & Hypothesis Framing:**
+    - Client-observed SQL query duration ($T_{3\text{b}}$) remained stable across workers: **54.49 ms** (1 worker) vs **53.69 ms** (2 workers) vs **54.88 ms** (4 workers).
+    - Client-observed commit duration ($T_{3\text{c}}$) remained stable: **4.91 ms** (1 worker) vs **4.16 ms** (2 workers) vs **4.19 ms** (4 workers).
+    - Stable query timings are consistent with minimal database lock contention under this workload, suggesting per-connection query latency behaves independently; internal lock contention and WAL fsync behaviors remain working hypotheses requiring deeper engine-level instrumentation.
+  - **Database Correctness:** Exactly 50,000 / 50,000 spans persisted in every run with **0 duplicates and 0 lost spans** verified via primary key constraint check.

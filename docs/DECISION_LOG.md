@@ -72,7 +72,7 @@ Day 3 decisively proves that request degradation under high concurrency is decou
 - In `mode=stream`, the database connection pool was entirely removed from the HTTP request path (FastAPI DB checkouts = 0).
 - Telemetry batches are published directly to an in-memory Redis 7 instance via single async `XADD` operations.
 - Despite eliminating database writes from the request path, tail latencies at Concurrency 25 remained in the ~240 ms (p50) to ~700 ms (p95) range.
-- **Root Cause Analysis (Refined in Day 4):** While initially hypothesized as CPU saturation from Pydantic validation, fine-grained microsecond profiling established that Pydantic validation takes only ~0.3–0.6 ms per request. The tail latency under high concurrency is primarily driven by Python asyncio event loop task scheduling contention: cooperative multitasking across 25 concurrent connections with 100-span batches multiplexed over a single thread causes coroutines to wait in scheduler queues while awaiting I/O readiness.
+- **Root Cause Analysis (Refined in Day 4):** While initially hypothesized as CPU saturation from Pydantic validation, fine-grained microsecond profiling established that Pydantic validation takes only ~0.3–0.6 ms per request. The tail latency under high concurrency is hypothesized to reflect Python asyncio event loop task scheduling contention: cooperative multitasking across 25 concurrent connections with 100-span batches multiplexed over a single thread causes coroutines to wait in scheduler queues while awaiting I/O readiness, though definitively isolating scheduler delay from socket buffer backpressure requires further low-level instrumentation.
 
 > [!NOTE]
 > While Redis Streams successfully decoupled producers from downstream storage outages and database lock contention, Scenario E latency ($p_{95} = 700.11\text{ ms}$) demonstrates that single-process event loop scheduling remains an API acceptance constraint under high concurrency, informing the roadmap toward multi-process Uvicorn workers.
@@ -130,13 +130,13 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
    - **Total End-to-End Drain Time:** $T_{\text{queue\_empty}} - T_{\text{ingest\_start}}$  
      Measures the comprehensive pipeline lifecycle from the moment the first client request was initiated until the stream and PEL reached depth 0.
    - **Audit of $T_{\text{api\_redis}}$ Gateway Timer:**  
-     Isolated measurement reveals $T_{\text{api\_parse}}$ takes 0.63 ms ($p_{50} = 0.51\text{ ms}$) and $T_{\text{api\_serialize}}$ takes 0.12 ms ($p_{50} = 0.10\text{ ms}$). The remaining ~44 ms in `await redis.xadd()` under $C=10$ is not network I/O to Redis (which is <1 ms), but Python asyncio event loop task scheduling and context switching while 10 concurrent HTTP coroutines are multiplexed across a single thread.
+     Isolated measurement reveals $T_{\text{api\_parse}}$ takes 0.63 ms ($p_{50} = 0.51\text{ ms}$) and $T_{\text{api\_serialize}}$ takes 0.12 ms ($p_{50} = 0.10\text{ ms}$). The remaining ~44 ms in `await redis.xadd()` under $C=10$ is hypothesized to reflect Python asyncio event loop task scheduling and context switching overhead while 10 concurrent HTTP coroutines are multiplexed across a single thread rather than pure Redis network round-trip time (<1 ms), though definitively isolating loop scheduling from socket buffer backpressure requires deeper instrumentation.
 
 2. **Deconstruction of the 52 ms Database Persistence Bottleneck ($T_3$):**
    Deconstructing the asyncpg database write step across 500 batches (50,000 spans) yielded:
    - **$T_{3\text{a}}$ (Connection Pool Acquisition):** Mean = **0.025 ms** ($p_{50} = 0.021\text{ ms}, p_{95} = 0.044\text{ ms}$). Pool checkout contention is negligible.
    - **$T_{3\text{b}}$ (SQL Fetch/Execute Duration):** Mean = **48.35 ms** ($p_{50} = 47.78\text{ ms}, p_{95} = 52.82\text{ ms}$). Client-observed duration executing the parameterized SQL UNNEST query and fetching returned rows (does not isolate PostgreSQL internal execution). Accounts for ~92.4% of total database roundtrip time.
-   - **$T_{3\text{c}}$ (Transaction Commit Duration):** Mean = **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$). Client-observed transaction commit duration via asyncpg (does not independently measure physical WAL fsync). Accounts for ~4.6% of database roundtrip time.
+   - **$T_{3\text{c}}$ (Transaction Commit Duration):** Mean = **2.40 ms** ($p_{50} = 2.18\text{ ms}, p_{95} = 4.37\text{ ms}$). Client-observed transaction commit duration via asyncpg (captures client-observed commit completion without independently measuring physical WAL fsync). Accounts for ~4.6% of database roundtrip time.
 
 3. **Horizontal Worker Scaling (1-Worker vs. 2-Worker Controlled Experiment):**
    Testing on the identical Scenario D workload (500 requests $\times$ 100 spans = 50,000 spans at $C=10$):
@@ -146,7 +146,7 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
    - **Contention Impact:** Scaling to 2 workers caused zero database pool degradation ($T_{3\text{a}}$ remained 0.025 ms) and zero SQL query degradation ($T_{3\text{b}}$ remained 48.88 ms), demonstrating linear throughput scaling through horizontal worker concurrency without requiring schema alterations or unsafe PostgreSQL configuration adjustments.
 
 4. **Day 5 Addendum: 1 -> 2 -> 4 Worker Scaling Curve & Bottleneck Invariance:**
-   On Day 5, we executed the 3-way controlled scaling comparison across 1, 2, and 4 concurrent consumer workers processing 50,000 spans (500 requests $\times$ 100 spans/req at $C=10$) under consumer group `pulseops-ingest-group` on `telemetry:stream` (raw data in `backend/benchmarks/results/day5_worker_scaling_experiment.json`).
+   On Day 5, we executed the 3-way controlled scaling comparison across 1, 2, and 4 concurrent consumer workers processing 50,000 spans (500 requests $\times$ 100 spans/req at $C=10$) under isolated benchmark stream and group settings (raw data in `backend/benchmarks/results/day5_worker_scaling_experiment.json`).
 
    | Metric | Run 1: 1 Worker | Run 2: 2 Workers | Run 3: 4 Workers |
    |---|:---:|:---:|:---:|
@@ -157,6 +157,8 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
    | **Total End-to-End Drain Time** | 33.931 s | 17.074 s (-49.7%) | 9.773 s (-71.2%) |
    | **Worker Active Throughput** | 1,503.1 spans/s | 3,032.6 spans/s (+101.8%) | 5,541.9 spans/s (+268.7%) |
    | **End-to-End Throughput** | 1,473.6 spans/s | 2,928.4 spans/s (+98.7%) | 5,116.1 spans/s (+247.2%) |
+   | **API Ingestion Latency ($p_{95}$)** | 127.48 ms | 157.22 ms | 197.24 ms |
+   | **API Ingestion Latency ($p_{99}$)** | 289.53 ms | 302.50 ms | 319.37 ms |
    | **$T_{3\text{a}}$ Pool Acquisition** | 0.04 ms (p95: 0.06) | 0.05 ms (p95: 0.08) | 0.06 ms (p95: 0.09) |
    | **$T_{3\text{b}}$ SQL Fetch/Execute** | 54.49 ms (p95: 59.37) | 53.69 ms (p95: 58.24) | 54.88 ms (p95: 60.19) |
    | **$T_{3\text{c}}$ Transaction Commit** | 4.91 ms (p95: 7.58) | 4.16 ms (p95: 5.77) | 4.19 ms (p95: 6.62) |
@@ -165,9 +167,14 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
 
    **Key Architectural Conclusions:**
    - **Empirical Scaling Efficiency:**
-     - 1 -> 2 workers delivered **+101.8% throughput** and cut drain duration by **50.4%** (101.8% of linear ideal).
-     - 2 -> 4 workers delivered an additional **+82.7% throughput** and cut drain duration by **45.3%** (82.7% of linear ideal).
-     - 1 -> 4 workers overall achieved **+268.7% throughput** (3.69x baseline) and a **72.9% reduction in drain duration** (89.6% overall scaling efficiency).
-   - **PostgreSQL Persistence Invariance:** Client-observed SQL query duration ($T_{3\text{b}}$) remained completely stable at **54.49 ms -> 53.69 ms -> 54.88 ms** across 1, 2, and 4 concurrent workers inserting unnested spans. Parallel database transactions generated zero lock contention, proving that the ~54 ms per-batch bottleneck is an isolated per-connection cost that scales horizontally with worker concurrency.
+     Using the conventional incremental-throughput efficiency formula:
+     $$\text{Efficiency} = \frac{\text{Speedup} - 1}{\text{worker\_count} - 1} \times 100\%$$
+     - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ **101.8% scaling efficiency** (+101.8% throughput, -49.7% end-to-end drain duration).
+     - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ **82.7% scaling efficiency** (+82.7% throughput, -42.8% end-to-end drain duration).
+     - 1 -> 4 workers (overall): Speedup = 3.69x $\rightarrow$ **89.6% scaling efficiency** (+268.7% throughput, -71.2% end-to-end drain duration).
+   - **Operational Trade-Off & Non-Optimality of 4 Workers:**
+     Scaling consumer workers from 1 to 4 delivered substantial downstream throughput gains (1,503.1 $\rightarrow$ 5,541.9 spans/s) and slashed drain times (33.9 s $\rightarrow$ 9.8 s). However, concurrently active workers also increased resource contention on the shared host, causing upstream API $p_{95}$ latency to increase from 127.48 ms to 197.24 ms and $p_{99}$ latency to rise from 289.53 ms to 319.37 ms. Four workers are therefore **not automatically optimal**; worker pool sizing represents an architectural trade-off between backlog drain velocity and upstream ingestion latency.
+   - **PostgreSQL Persistence Invariance:**
+     Client-observed SQL query duration ($T_{3\text{b}}$) remained stable across workers: **54.49 ms -> 53.69 ms -> 54.88 ms**. This stability is consistent with minimal database lock contention at this concurrency level, suggesting that per-connection query latency behaves independently without evident contention at the client level. Detailed internal lock wait validation would require engine-level wait event tracing.
    - **Redis Consumer Group Fairness:** Redis consumer group load distribution remained balanced across all workers with no starving consumers (25.8%, 26.8%, 24.2%, 23.2% across 4 workers).
    - **Absolute Data Correctness:** Exact 50,000 / 50,000 spans persisted across all runs with 0 duplicates, proving that concurrent XREADGROUP processing and asyncpg batch UNNEST insertion maintain strict Day 1 system invariants.
