@@ -469,11 +469,6 @@ async def main():
             return f"{agg['mean_ms']:.2f} ms (p95: {agg['p95_ms']:.2f})"
         return "N/A"
 
-    def get_w_mean(run_dict, stage_key):
-        agg = run_dict.get("aggregate_worker_metrics", {}).get(stage_key)
-        if agg and agg.get("count", 0) > 0:
-            return f"{agg['mean_ms']:.2f} ms"
-        return "N/A"
 
     # Print 3-Way Scaling Comparison Table
     print("\n" + "=" * 96)
