@@ -109,11 +109,14 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
     | Duplicate spans reported | 0 | 0 | 0 |
 
   - **Scaling Efficiency Arithmetic:**
-    - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ Efficiency = $\mathbf{100.9\%}$ ($2.018 / 2$, or $+101.8\%$ incremental; throughput $+101.8\%$, end-to-end drain time $-49.7\%$).
-    - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ Efficiency = $\mathbf{91.4\%}$ ($1.827 / 2$; throughput $+82.7\%$, end-to-end drain time $-42.8\%$).
-    - 1 -> 4 workers (overall): Speedup = 3.687x $\rightarrow$ Efficiency = $\mathbf{92.2\%}$ ($3.687 / 4$), calculated relative to Run 1 ($1,503.1\text{ spans/s}$) of the same Day 5 benchmark (throughput $+268.7\%$, end-to-end drain time $-71.2\%$).
-  - **Operational Trade-Off & Non-Optimality of 4 Workers:**
-    While 4 workers maximize persistence throughput and reduce drain time from 33.9 s to 9.8 s, upstream API latencies increased across the runs ($p_{95}$ from 127.5 ms to 197.2 ms; $p_{99}$ from 289.5 ms to 319.4 ms) due to host-level CPU contention across the API, workers, and database. Four workers are not automatically optimal and should be tuned against host core capacity.
+    Formula:
+    $$\text{Scaling Efficiency } (E_N) = \frac{\text{Throughput}_N}{N \times \text{Throughput}_1} \times 100\% = \frac{\text{Speedup } S_N}{N} \times 100\%$$
+    - 1 -> 2 workers: Speedup $S_2 = 2.018\times \rightarrow \text{Efficiency } E_2 = \frac{2.018}{2} \times 100\% = \mathbf{100.9\%}$ ($+101.8\%$ throughput increase, end-to-end drain time $-49.7\%$).
+    - 2 -> 4 workers (incremental): Speedup $S_{2\rightarrow 4} = 1.827\times \rightarrow \text{Efficiency } E_{2\rightarrow 4} = \frac{1.827}{2} \times 100\% = \mathbf{91.4\%}$ ($+82.7\%$ incremental throughput increase, end-to-end drain time $-42.8\%$).
+    - 1 -> 4 workers (overall): Speedup $S_4 = 3.687\times \rightarrow \text{Efficiency } E_4 = \frac{3.687}{4} \times 100\% = \mathbf{92.2\%}$, calculated relative to Run 1 ($1,503.1\text{ spans/s}$) of the same Day 5 benchmark (+268.7% throughput, end-to-end drain time $-71.2\%$).
+  - **Operational Trade-Off & Latency Regression Hypothesis:**
+    While 4 workers maximize downstream persistence throughput and reduce drain time from 33.9 s to 9.8 s, upstream API latencies exhibited degradation across runs in Day 5 ($p_{95}$ from 127.48 ms to 197.24 ms) and in Day 6 comparative testing (87.36 ms vs. 93.62 ms in quiescent runs; 152.85 ms vs. 321.71 ms under elevated host load).
+    *Hypothesis Assessment:* Aggregate host CPU utilization (15–25% mean, peaking at 60–86%) does not establish full core saturation. Host process scheduling contention and event-loop dispatch delays remain a supported hypothesis, not a conclusively proven root cause. Detailed Day 6 instrumentation revealed that Redis server-side command execution remains sub-millisecond ($27 - 40\ \mu\text{s}$), whereas client connection pool acquisition under concurrency and local process/socket competition contribute to client-observed latency. Four workers are not automatically optimal and represent an architectural trade-off between backlog drain velocity and upstream ingestion latency.
   - **Database Stage Invariance & Hypothesis Framing:**
     - Client-observed SQL query duration ($T_{3\text{b}}$) remained stable across workers: **54.49 ms** (1 worker) vs **53.69 ms** (2 workers) vs **54.88 ms** (4 workers).
     - Client-observed commit duration ($T_{3\text{c}}$) remained stable: **4.91 ms** (1 worker) vs **4.16 ms** (2 workers) vs **4.19 ms** (4 workers).
