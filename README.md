@@ -90,7 +90,7 @@ python app/worker.py --once
 
 ## 5. Performance Benchmarks: Direct PG vs. Asynchronous Stream Ingestion
 
-> [!NOTE]
+
 > **Workload-Specific Observation:** All metrics reported below represent empirical observations from controlled synthetic benchmark runs (100-span batches on local Docker infrastructure) and should not be construed as universal performance guarantees across different network, disk, or deployment topologies.
 
 ### Pipeline Stage Measurement Distinction
@@ -125,7 +125,7 @@ While Redis Streams successfully decouples upstream HTTP callers so that the API
 
 ### Day 5 Multi-Worker Scaling Comparison (1 -> 2 -> 4 Workers)
 
-> [!NOTE]
+
 > **Workload-Specific Observation:** The figures below reflect a controlled synthetic benchmark (50,000 spans, 500 requests $\times$ 100 spans/req at Concurrency = 10) on local Docker infrastructure (raw dataset: [`backend/benchmarks/results/day5_worker_scaling_experiment.json`](backend/benchmarks/results/day5_worker_scaling_experiment.json)). These are empirical observations, not universal performance guarantees.
 
 | Metric | 1 worker | 2 workers | 4 workers |

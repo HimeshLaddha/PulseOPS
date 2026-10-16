@@ -167,11 +167,9 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
 
    **Key Architectural Conclusions:**
    - **Empirical Scaling Efficiency:**
-     Using the conventional incremental-throughput efficiency formula:
-     $$\text{Efficiency} = \frac{\text{Speedup} - 1}{\text{worker\_count} - 1} \times 100\%$$
-     - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ **101.8% scaling efficiency** (+101.8% throughput, -49.7% end-to-end drain duration).
-     - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ **82.7% scaling efficiency** (+82.7% throughput, -42.8% end-to-end drain duration).
-     - 1 -> 4 workers (overall): Speedup = 3.69x $\rightarrow$ **89.6% scaling efficiency** (+268.7% throughput, -71.2% end-to-end drain duration).
+     - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ **100.9% scaling efficiency** ($2.018 / 2$, or $+101.8\%$ incremental; +101.8% throughput, -49.7% end-to-end drain duration).
+     - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ **91.4% scaling efficiency** ($1.827 / 2$; +82.7% throughput, -42.8% end-to-end drain duration).
+     - 1 -> 4 workers (overall): Speedup = 3.687x $\rightarrow$ **92.2% scaling efficiency** ($3.687 / 4$), calculated relative to Run 1 ($1,503.1\text{ spans/s}$) of the same Day 5 benchmark (+268.7% throughput, -71.2% end-to-end drain duration).
    - **Operational Trade-Off & Non-Optimality of 4 Workers:**
      Scaling consumer workers from 1 to 4 delivered substantial downstream throughput gains (1,503.1 $\rightarrow$ 5,541.9 spans/s) and slashed drain times (33.9 s $\rightarrow$ 9.8 s). However, concurrently active workers also increased resource contention on the shared host, causing upstream API $p_{95}$ latency to increase from 127.48 ms to 197.24 ms and $p_{99}$ latency to rise from 289.53 ms to 319.37 ms. Four workers are therefore **not automatically optimal**; worker pool sizing represents an architectural trade-off between backlog drain velocity and upstream ingestion latency.
    - **PostgreSQL Persistence Invariance:**

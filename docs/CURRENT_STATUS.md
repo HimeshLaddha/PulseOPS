@@ -109,10 +109,9 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
     | Duplicate spans reported | 0 | 0 | 0 |
 
   - **Scaling Efficiency Arithmetic:**
-    Formula: $\text{Efficiency} = \frac{\text{Speedup} - 1}{\text{worker\_count} - 1} \times 100\%$
-    - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ Efficiency = $\mathbf{101.8\%}$ (Throughput $+101.8\%$, end-to-end drain time $-49.7\%$).
-    - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ Efficiency = $\mathbf{82.7\%}$ (Throughput $+82.7\%$, end-to-end drain time $-42.8\%$).
-    - 1 -> 4 workers (overall): Speedup = 3.69x $\rightarrow$ Efficiency = $\frac{3.687 - 1}{3} \times 100\% = \mathbf{89.6\%}$ (Throughput $+268.7\%$, end-to-end drain time $-71.2\%$).
+    - 1 -> 2 workers: Speedup = 2.02x $\rightarrow$ Efficiency = $\mathbf{100.9\%}$ ($2.018 / 2$, or $+101.8\%$ incremental; throughput $+101.8\%$, end-to-end drain time $-49.7\%$).
+    - 2 -> 4 workers (incremental): Speedup = 1.83x $\rightarrow$ Efficiency = $\mathbf{91.4\%}$ ($1.827 / 2$; throughput $+82.7\%$, end-to-end drain time $-42.8\%$).
+    - 1 -> 4 workers (overall): Speedup = 3.687x $\rightarrow$ Efficiency = $\mathbf{92.2\%}$ ($3.687 / 4$), calculated relative to Run 1 ($1,503.1\text{ spans/s}$) of the same Day 5 benchmark (throughput $+268.7\%$, end-to-end drain time $-71.2\%$).
   - **Operational Trade-Off & Non-Optimality of 4 Workers:**
     While 4 workers maximize persistence throughput and reduce drain time from 33.9 s to 9.8 s, upstream API latencies increased across the runs ($p_{95}$ from 127.5 ms to 197.2 ms; $p_{99}$ from 289.5 ms to 319.4 ms) due to host-level CPU contention across the API, workers, and database. Four workers are not automatically optimal and should be tuned against host core capacity.
   - **Database Stage Invariance & Hypothesis Framing:**

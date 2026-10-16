@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 # Ensure backend root is in sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +43,8 @@ class WorkerProfilingTracker:
         self.span_counts: int = 0
         self.start_time: Optional[float] = None
         self.end_time: Optional[float] = None
+        self.start_proc_times: Optional[Any] = None
+        self.end_proc_times: Optional[Any] = None
 
     def record_fetch(self, duration: float):
         self.fetch_times.append(duration)
@@ -59,6 +61,7 @@ class WorkerProfilingTracker:
     ):
         if self.start_time is None:
             self.start_time = time.perf_counter()
+            self.start_proc_times = os.times()
         self.parse_times.append(t_parse)
         self.db_times.append(t_db)
         self.ack_times.append(t_ack)
@@ -68,6 +71,7 @@ class WorkerProfilingTracker:
         self.batch_counts += 1
         self.span_counts += spans
         self.end_time = time.perf_counter()
+        self.end_proc_times = os.times()
 
     def get_summary(self) -> dict:
         def stats(arr):
@@ -88,6 +92,9 @@ class WorkerProfilingTracker:
         msg_per_sec = (self.batch_counts / total_wall_s) if total_wall_s > 0 else 0.0
         spans_per_sec = (self.span_counts / total_wall_s) if total_wall_s > 0 else 0.0
 
+        user_s = (self.end_proc_times.user - self.start_proc_times.user) if (self.start_proc_times and self.end_proc_times) else 0.0
+        sys_s = (self.end_proc_times.system - self.start_proc_times.system) if (self.start_proc_times and self.end_proc_times) else 0.0
+
         return {
             "consumer_name": self.consumer_name,
             "messages_processed": self.batch_counts,
@@ -97,6 +104,11 @@ class WorkerProfilingTracker:
             "active_drain_seconds": total_wall_s,
             "messages_per_sec": msg_per_sec,
             "spans_per_sec": spans_per_sec,
+            "worker_process_cpu_s": {
+                "user_cpu_s": round(user_s, 4),
+                "system_cpu_s": round(sys_s, 4),
+                "total_cpu_s": round(user_s + sys_s, 4),
+            },
             "t_fetch": stats(self.fetch_times),
             "t_parse": stats(self.parse_times),
             "t_db": stats(self.db_times),

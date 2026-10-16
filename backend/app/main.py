@@ -1,8 +1,10 @@
+import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Path, Query, Request, status
@@ -34,16 +36,61 @@ class GatewayProfilingMetrics:
         self.parse_times: list[float] = []
         self.serialize_times: list[float] = []
         self.redis_times: list[float] = []
+        self.redis_conn_acquire_times: list[float] = []
+        self.redis_cmd_exec_times: list[float] = []
+        self.event_loop_lags: list[float] = []
+        self._lag_task: Optional[asyncio.Task] = None
+        self._lag_running: bool = False
+        self._proc_start_times: Optional[Any] = None
 
-    def record(self, t_parse: float, t_serialize: float, t_redis: float):
+    def start_monitoring(self):
+        self._proc_start_times = os.times()
+        if not self._lag_running:
+            self._lag_running = True
+      
+            self.event_loop_lags.clear()
+            self._lag_task = asyncio.create_task(self._sample_loop_lag())
+
+    async def _sample_loop_lag(self):
+        interval = 0.005  # 5 ms sample resolution
+        try:
+            while self._lag_running:
+                t0 = time.perf_counter()
+                await asyncio.sleep(interval)
+                elapsed = time.perf_counter() - t0
+                lag = max(0.0, elapsed - interval)
+                self.event_loop_lags.append(lag)
+        except asyncio.CancelledError:
+            pass
+
+    def stop_monitoring(self):
+        self._lag_running = False
+        if self._lag_task and not self._lag_task.done():
+            self._lag_task.cancel()
+            self._lag_task = None
+
+    def record(
+        self,
+        t_parse: float,
+        t_serialize: float,
+        t_redis: float,
+        t_conn_acquire: float = 0.0,
+        t_cmd_exec: float = 0.0,
+    ):
         self.parse_times.append(t_parse)
         self.serialize_times.append(t_serialize)
         self.redis_times.append(t_redis)
+        self.redis_conn_acquire_times.append(t_conn_acquire)
+        self.redis_cmd_exec_times.append(t_cmd_exec)
 
     def reset(self):
         self.parse_times.clear()
         self.serialize_times.clear()
         self.redis_times.clear()
+        self.redis_conn_acquire_times.clear()
+        self.redis_cmd_exec_times.clear()
+        self.event_loop_lags.clear()
+        self.start_monitoring()
 
     def get_summary(self) -> dict:
         def stats(arr):
@@ -61,11 +108,23 @@ class GatewayProfilingMetrics:
                 "max_ms": s[-1] * 1000.0,
             }
 
+        proc_now = os.times()
+        user_s = (proc_now.user - self._proc_start_times.user) if self._proc_start_times else 0.0
+        sys_s = (proc_now.system - self._proc_start_times.system) if self._proc_start_times else 0.0
+
         return {
             "total_requests": len(self.parse_times),
             "t_api_parse": stats(self.parse_times),
             "t_api_serialize": stats(self.serialize_times),
             "t_api_redis_xadd": stats(self.redis_times),
+            "t_redis_conn_acquire": stats(self.redis_conn_acquire_times),
+            "t_redis_cmd_exec": stats(self.redis_cmd_exec_times),
+            "event_loop_lag": stats(self.event_loop_lags),
+            "api_process_cpu_s": {
+                "user_cpu_s": round(user_s, 4),
+                "system_cpu_s": round(sys_s, 4),
+                "total_cpu_s": round(user_s + sys_s, 4),
+            },
         }
 
 
@@ -206,15 +265,28 @@ async def ingest_spans(
         t_redis_start = time.perf_counter()
         try:
             redis = get_redis_client()
-            stream_id = await redis.xadd(
-                target_stream,
-                {"data": payload_json},
-            )
+            pool = redis.connection_pool
+
+            # Separate connection pool acquisition latency from Redis command execution
+            t_acq_start = time.perf_counter()
+            conn = await pool.get_connection()
+            t_conn_acquire = time.perf_counter() - t_acq_start
+
+            t_cmd_start = time.perf_counter()
+            try:
+                await conn.send_command("XADD", target_stream, "*", "data", payload_json)
+                stream_id = await redis.parse_response(conn, "XADD")
+            finally:
+                await pool.release(conn)
+            t_cmd_exec = time.perf_counter() - t_cmd_start
             t_api_redis_xadd = time.perf_counter() - t_redis_start
+
             gateway_profiler.record(
                 t_parse=t_api_parse,
                 t_serialize=t_api_serialize,
                 t_redis=t_api_redis_xadd,
+                t_conn_acquire=t_conn_acquire,
+                t_cmd_exec=t_cmd_exec,
             )
 
             return JSONResponse(
