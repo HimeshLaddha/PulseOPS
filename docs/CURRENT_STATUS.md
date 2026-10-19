@@ -1,8 +1,8 @@
 # PulseOps — Current Status
 
-**Active Phase:** Day 5: 1 -> 2 -> 4 Worker Scaling Experiment — **COMPLETE**<br>
-**Last Updated:** 2026-10-16<br>
-**Current Active Checkpoint:** Day 5 Controlled Scaling Experiment Verified (1 vs 2 vs 4 Workers)
+**Active Phase:** Day 7 Phase 1: Trace Tree Assembly & DAG Endpoint — **COMPLETE**<br>
+**Last Updated:** 2026-10-19<br>
+**Current Active Checkpoint:** Day 7 Phase 1 Trace DAG Assembly Verified
 
 ---
 
@@ -116,9 +116,17 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
     - 1 -> 4 workers (overall): Speedup $S_4 = 3.687\times \rightarrow \text{Efficiency } E_4 = \frac{3.687}{4} \times 100\% = \mathbf{92.2\%}$, calculated relative to Run 1 ($1,503.1\text{ spans/s}$) of the same Day 5 benchmark (+268.7% throughput, end-to-end drain time $-71.2\%$).
   - **Operational Trade-Off & Latency Regression Hypothesis:**
     While 4 workers maximize downstream persistence throughput and reduce drain time from 33.9 s to 9.8 s, upstream API latencies exhibited degradation across runs in Day 5 ($p_{95}$ from 127.48 ms to 197.24 ms) and in Day 6 comparative testing (87.36 ms vs. 93.62 ms in quiescent runs; 152.85 ms vs. 321.71 ms under elevated host load).
-    *Hypothesis Assessment:* Aggregate host CPU utilization (15–25% mean, peaking at 60–86%) does not establish full core saturation. Host process scheduling contention and event-loop dispatch delays remain a supported hypothesis, not a conclusively proven root cause. Detailed Day 6 instrumentation revealed that Redis server-side command execution remains sub-millisecond ($27 - 40\ \mu\text{s}$), whereas client connection pool acquisition under concurrency and local process/socket competition contribute to client-observed latency. Four workers are not automatically optimal and represent an architectural trade-off between backlog drain velocity and upstream ingestion latency.
+    *Hypothesis Assessment:* Aggregate host CPU utilization (15–25% mean, peaking at 60–86%) does not establish full core saturation. The Day 6 API p95 latency shift is characterized as local host-level CPU and process scheduling contention among the 8 colocated processes (4 workers, Uvicorn, PostgreSQL, Redis, and the async test client), without asserting unisolated internal root causes. Detailed Day 6 delta-based instrumentation proved that Redis server-side command execution time is strictly sub-35 microseconds (`27.5 μs – 33.8 μs`) via `INFO commandstats`, whereas client connection pool acquisition under concurrency and local process/socket competition contribute to client-observed latency. Four workers are not automatically optimal and represent an architectural trade-off between backlog drain velocity and upstream ingestion latency.
   - **Database Stage Invariance & Hypothesis Framing:**
     - Client-observed SQL query duration ($T_{3\text{b}}$) remained stable across workers: **54.49 ms** (1 worker) vs **53.69 ms** (2 workers) vs **54.88 ms** (4 workers).
     - Client-observed commit duration ($T_{3\text{c}}$) remained stable: **4.91 ms** (1 worker) vs **4.16 ms** (2 workers) vs **4.19 ms** (4 workers).
     - Stable query timings are consistent with minimal database lock contention under this workload, suggesting per-connection query latency behaves independently; internal lock contention and WAL fsync behaviors remain working hypotheses requiring deeper engine-level instrumentation.
   - **Database Correctness:** Exactly 50,000 / 50,000 spans persisted in every run with **0 duplicates and 0 lost spans** verified via primary key constraint check.
+- [x] **Day 7 Phase 1: Trace Tree Assembly & DAG Endpoint:**
+  - Strongly typed Pydantic V2 models: `SpanTreeNode` and `TraceTreeResponse`.
+  - Endpoint `GET /v1/traces/{trace_id}/tree` exposing assembled DAG tree hierarchy alongside backwards-compatible `GET /v1/traces/{trace_id}`.
+  - $O(N)$ tree construction linking parent-child spans via `parent_span_id`.
+  - Non-crashing orphan categorization isolating missing or detached parent spans into `orphans`.
+  - Accurate critical path duration calculation via interval-union merging, preventing naive summation distortion across concurrent branches while respecting disjoint idle gaps.
+  - Cycle-safe `max_depth` calculation.
+  - 100% test coverage across linear, branched, orphan, and 404/422 validation cases in `backend/tests/test_trace_tree.py`.

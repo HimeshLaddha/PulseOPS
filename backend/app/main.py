@@ -19,7 +19,9 @@ from app.schemas import (
     IngestResponse,
     SpanBatchIngestRequest,
     SpanBatchQueuedResponse,
+    SpanTreeNode,
     TraceResponse,
+    TraceTreeResponse,
 )
 
 logging.basicConfig(
@@ -375,4 +377,196 @@ async def get_trace(
         service_name=primary_service,
         span_count=len(spans),
         spans=spans,
+    )
+
+
+def _compute_active_execution_ms(intervals: list[tuple[int, int]]) -> float:
+    """
+    Compute total active execution duration in ms using interval-union merging.
+    Merges overlapping and concurrent time intervals to prevent naive parallel summation.
+    """
+    if not intervals:
+        return 0.0
+
+    sorted_intervals = sorted(intervals, key=lambda x: (x[0], x[1]))
+    merged: list[tuple[int, int]] = []
+    curr_start, curr_end = sorted_intervals[0]
+
+    for start, end in sorted_intervals[1:]:
+        if start <= curr_end:
+            curr_end = max(curr_end, end)
+        else:
+            merged.append((curr_start, curr_end))
+            curr_start, curr_end = start, end
+
+    merged.append((curr_start, curr_end))
+    total_nanos = sum(end - start for start, end in merged)
+    return round(total_nanos / 1_000_000.0, 6)
+
+
+def _compute_longest_path_duration_ms(top_nodes: list[SpanTreeNode]) -> float:
+    """
+    Compute maximum cumulative duration along any directed root-to-leaf path in ms
+    using iterative DFS over tree paths.
+    """
+    if not top_nodes:
+        return 0.0
+
+    max_path_ms = 0.0
+    # Stack entries: (current_node, cumulative_duration_ms, path_visited_ids)
+    stack: list[tuple[SpanTreeNode, float, set[str]]] = [
+        (n, n.duration_ms, {n.span_id}) for n in top_nodes
+    ]
+
+    while stack:
+        curr, acc_dur, path_set = stack.pop()
+        valid_children = [c for c in curr.children if c.span_id not in path_set]
+
+        if not valid_children:
+            # Reached a leaf node or cyclic boundary
+            if acc_dur > max_path_ms:
+                max_path_ms = acc_dur
+        else:
+            for child in valid_children:
+                stack.append((child, acc_dur + child.duration_ms, path_set | {child.span_id}))
+
+    return round(max_path_ms, 6)
+
+
+@app.get(
+    "/v1/traces/{trace_id}/tree",
+    response_model=TraceTreeResponse,
+    tags=["Telemetry"],
+    summary="Retrieve a trace assembled as an iterative DAG / hierarchy tree",
+)
+async def get_trace_tree(
+    trace_id: Annotated[
+        str,
+        Path(
+            pattern=TRACE_ID_REGEX,
+            description="32-character lowercase hexadecimal trace ID",
+            examples=["0123456789abcdef0123456789abcdef"],
+        ),
+    ],
+):
+    """
+    Retrieve all spans for a trace assembled into an iterative DAG hierarchy / tree:
+    - O(N) iterative tree construction linking children via parent_span_id.
+    - Missing-parent references are categorized into orphans without crashing.
+    - Iterative BFS assigns 0-indexed depth (root=0) and computes max_depth.
+    - active_execution_ms computed via interval-union merging of overlapping spans.
+    - longest_path_duration_ms computed via iterative DFS accumulating root-to-leaf durations.
+    - wall_clock_duration_ms computed as overall span envelope (max(end) - min(start)).
+    - Returns HTTP 404 if trace does not exist.
+    """
+    pool = get_db_pool()
+    spans = await get_spans_by_trace(pool=pool, trace_id=trace_id)
+
+    if not spans:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Trace {trace_id} not found",
+        )
+
+    # 1. Instantiate tree nodes in O(N) and collect intervals
+    node_map: dict[str, SpanTreeNode] = {}
+    intervals: list[tuple[int, int]] = []
+    min_start = spans[0]["start_time_unix_nano"]
+    max_end = spans[0]["end_time_unix_nano"]
+
+    for s in spans:
+        node = SpanTreeNode(
+            span_id=s["span_id"],
+            trace_id=s["trace_id"],
+            parent_span_id=s["parent_span_id"],
+            service_name=s["service_name"],
+            operation_name=s["operation_name"],
+            start_time_unix_nano=s["start_time_unix_nano"],
+            end_time_unix_nano=s["end_time_unix_nano"],
+            duration_ms=s["duration_ms"],
+            status_code=s["status_code"],
+            attributes=s.get("attributes", {}),
+            depth=0,
+            children=[],
+        )
+        node_map[node.span_id] = node
+        intervals.append((s["start_time_unix_nano"], s["end_time_unix_nano"]))
+        if s["start_time_unix_nano"] < min_start:
+            min_start = s["start_time_unix_nano"]
+        if s["end_time_unix_nano"] > max_end:
+            max_end = s["end_time_unix_nano"]
+
+    # 2. Iterative Graph Construction in O(N)
+    roots: list[SpanTreeNode] = []
+    orphans: list[SpanTreeNode] = []
+
+    for s in spans:
+        node = node_map[s["span_id"]]
+        parent_id = node.parent_span_id
+        if parent_id is None:
+            roots.append(node)
+        elif parent_id in node_map and parent_id != node.span_id:
+            node_map[parent_id].children.append(node)
+        else:
+            orphans.append(node)
+
+    # Iterative reachability pass to catch and isolate unreached cyclic components
+    reachable: set[str] = {n.span_id for n in roots + orphans}
+    reach_queue = list(roots + orphans)
+    q_idx = 0
+    while q_idx < len(reach_queue):
+        curr_reach = reach_queue[q_idx]
+        q_idx += 1
+        for c in curr_reach.children:
+            if c.span_id not in reachable:
+                reachable.add(c.span_id)
+                reach_queue.append(c)
+
+    for s in spans:
+        sid = s["span_id"]
+        if sid not in reachable:
+            orphans.append(node_map[sid])
+            reachable.add(sid)
+
+    # 3. Iterative BFS Depth Calculation over roots and orphans
+    max_depth = 0
+    bfs_queue: list[SpanTreeNode] = []
+    for node in roots + orphans:
+        node.depth = 0
+        bfs_queue.append(node)
+
+    visited_depth: set[str] = {n.span_id for n in bfs_queue}
+    bfs_idx = 0
+    while bfs_idx < len(bfs_queue):
+        curr_node = bfs_queue[bfs_idx]
+        bfs_idx += 1
+        if curr_node.depth > max_depth:
+            max_depth = curr_node.depth
+
+        for child in curr_node.children:
+            if child.span_id not in visited_depth:
+                visited_depth.add(child.span_id)
+                child.depth = curr_node.depth + 1
+                bfs_queue.append(child)
+
+    # 4. Metric Calculations
+    wall_clock_duration_ms = round((max_end - min_start) / 1_000_000.0, 6)
+    active_execution_ms = _compute_active_execution_ms(intervals)
+    top_nodes = roots + orphans
+    longest_path_duration_ms = _compute_longest_path_duration_ms(top_nodes)
+
+    root_service = roots[0].service_name if roots else spans[0]["service_name"]
+
+    return TraceTreeResponse(
+        trace_id=trace_id,
+        root_service=root_service,
+        span_count=len(spans),
+        max_depth=max_depth,
+        wall_clock_duration_ms=wall_clock_duration_ms,
+        active_execution_ms=active_execution_ms,
+        longest_path_duration_ms=longest_path_duration_ms,
+        roots=roots,
+        orphans=orphans,
+        service_name=root_service,
+        critical_path_ms=active_execution_ms,
     )

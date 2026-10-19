@@ -174,8 +174,44 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
      - 1 -> 4 workers (overall): Speedup $S_4 = 3.687\times \rightarrow \mathbf{92.2\%}\text{ scaling efficiency}$ ($3.687 / 4$), calculated relative to Run 1 ($1,503.1\text{ spans/s}$) of the same Day 5 benchmark (+268.7% throughput, -71.2% end-to-end drain duration).
    - **Operational Trade-Off & Latency Regression Hypothesis:**
      Scaling consumer workers from 1 to 4 delivered substantial downstream throughput gains (1,503.1 $\rightarrow$ 5,541.9 spans/s) and slashed drain times (33.9 s $\rightarrow$ 9.8 s). However, concurrently active workers also coincided with upstream API latency degradation ($p_{95}$ increased from 127.48 ms to 197.24 ms in Day 5, and in Day 6 comparative testing ranged from 87.36 ms vs. 93.62 ms in quiescent runs to 152.85 ms vs. 321.71 ms under elevated host load).
-     *Hypothesis Assessment:* Aggregate host CPU utilization (15–25% mean, peaking at 60–86%) does not establish full core saturation. Host process scheduling contention and event-loop dispatch delays remain a supported hypothesis, not a conclusively proven root cause. Detailed Day 6 delta-based instrumentation proved that Redis server-side command execution is strictly sub-millisecond ($27 - 40\ \mu\text{s}$), whereas client connection pool acquisition under concurrency and local process/socket competition contribute to client-observed latency. Four workers are therefore **not automatically optimal**; worker pool sizing represents an architectural trade-off between backlog drain velocity and upstream ingestion latency.
+     *Hypothesis Assessment:* Aggregate host CPU utilization (15–25% mean, peaking at 60–86%) does not establish full core saturation. The Day 6 API p95 latency shift is characterized as local host-level CPU and process scheduling contention among the 8 colocated processes (4 workers, Uvicorn, PostgreSQL, Redis, and the async test client), without asserting unisolated internal root causes. Detailed Day 6 delta-based instrumentation proved that Redis server-side command execution time is strictly sub-35 microseconds (`27.5 μs – 33.8 μs`) via `INFO commandstats`, whereas client connection pool acquisition under concurrency and local process/socket competition contribute to client-observed latency. Four workers are therefore **not automatically optimal**; worker pool sizing represents an architectural trade-off between backlog drain velocity and upstream ingestion latency.
    - **PostgreSQL Persistence Invariance:**
      Client-observed SQL query duration ($T_{3\text{b}}$) remained stable across workers: **54.49 ms -> 53.69 ms -> 54.88 ms**. This stability is consistent with minimal database lock contention at this concurrency level, suggesting that per-connection query latency behaves independently without evident contention at the client level. Detailed internal lock wait validation would require engine-level wait event tracing.
    - **Redis Consumer Group Fairness:** Redis consumer group load distribution remained balanced across all workers with no starving consumers (25.8%, 26.8%, 24.2%, 23.2% across 4 workers).
    - **Absolute Data Correctness:** Exact 50,000 / 50,000 spans persisted across all runs with 0 duplicates, proving that concurrent XREADGROUP processing and asyncpg batch UNNEST insertion maintain strict Day 1 system invariants.
+
+---
+
+## ADR-006: Iterative Trace DAG Assembly & Metric Disambiguation
+
+- **Status:** ACCEPTED
+- **Date:** 2026-10-19
+- **Context:**
+  Distributed traces consist of spans linked by `parent_span_id` with execution intervals defined by integer nanosecond timestamps `[start_time_unix_nano, end_time_unix_nano]`.
+  When consuming traces, user-facing telemetry visualization tools and diagnostic workflows require structured DAG/tree hierarchies rather than flat span lists. In addition:
+  1. Spans can arrive out of order, or parent spans may be delayed or omitted, producing orphaned spans referencing nonexistent parents.
+  2. Concurrent or fan-out operations produce parallel branches where naive summation of span durations grossly exaggerates true wall-clock execution duration.
+  3. Timing metrics must be strictly disambiguated between wall-clock envelope, disjoint active execution time, and causal critical path length.
+  4. Graph traversal must remain strictly iterative to avoid Python call-stack exhaustion on deep or malformed hierarchies.
+  5. The API must maintain strict backwards compatibility with existing `GET /v1/traces/{trace_id}` flat responses.
+
+- **Decision:**
+  1. **Iterative Graph Construction ($O(N)$ Time Complexity):**
+     - Expose `GET /v1/traces/{trace_id}/tree` returning `TraceTreeResponse`.
+     - In-memory node index (`node_map`) maps `span_id` to `SpanTreeNode`.
+     - Spans with `parent_span_id is None` are appended to `roots`.
+     - Spans with valid parents are appended to `parent.children`.
+     - Missing-parent references are categorized into `orphans` without throwing exceptions or dropping nodes.
+     - Isolated cycles are captured via an iterative reachability sweep and safely isolated in `orphans`.
+  2. **Iterative BFS Depth Calculation:**
+     - Assigns 0-indexed `depth` (`root=0`) using an iterative BFS queue over `roots` and `orphans` to avoid Python call-stack limits.
+     - Computes `max_depth` across all reachable nodes.
+  3. **Disambiguated Timing Metrics:**
+     - **`wall_clock_duration_ms`**: Total trace envelope $\frac{\max(\text{end}) - \min(\text{start})}{10^6}$.
+     - **`active_execution_ms`**: Disjoint interval union across all spans, merging overlapping parallel branches to prevent double-counting while preserving idle gaps.
+     - **`longest_path_duration_ms`**: Maximum cumulative duration along any directed root-to-leaf path computed via iterative DFS accumulating `node.duration_ms`.
+
+- **Consequences:**
+  - Backwards compatibility is preserved for `GET /v1/traces/{trace_id}`.
+  - Ingestion and query schemas remain strongly typed via Pydantic V2 models (`SpanTreeNode`, `TraceTreeResponse`).
+  - Trace DAG construction and timing metrics run in $O(N)$ (and $O(N \log N)$ interval union sort), fully verified with unit and integration tests in `backend/tests/test_trace_tree.py`.

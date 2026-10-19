@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -119,3 +121,58 @@ class SpanBatchQueuedResponse(BaseModel):
     status: str = "queued"
     stream_id: str
     span_count: int
+
+
+class SpanTreeNode(SpanResponse):
+    depth: int = Field(
+        default=0,
+        description="0-indexed depth of this span in the execution hierarchy (root=0)",
+    )
+    children: list[SpanTreeNode] = Field(
+        default_factory=list,
+        description="Chronologically ordered direct child spans",
+    )
+
+
+SpanTreeNode.model_rebuild()
+
+
+class TraceTreeResponse(BaseModel):
+    trace_id: str
+    root_service: str = Field(
+        ...,
+        description="Service name associated with the root span",
+    )
+    span_count: int
+    max_depth: int = Field(
+        ...,
+        description="Maximum depth of the trace tree/DAG hierarchy (root=0)",
+    )
+    wall_clock_duration_ms: float = Field(
+        ...,
+        description="Overall span envelope duration in ms: max(end) - min(start)",
+    )
+    active_execution_ms: float = Field(
+        ...,
+        description="Total disjoint active execution duration in ms via interval-union merging",
+    )
+    longest_path_duration_ms: float = Field(
+        ...,
+        description="Maximum cumulative duration in ms along any directed root-to-leaf path",
+    )
+    roots: list[SpanTreeNode] = Field(
+        default_factory=list,
+        description="Root spans with no parent_span_id",
+    )
+    orphans: list[SpanTreeNode] = Field(
+        default_factory=list,
+        description="Spans referencing parent_span_ids not present in this trace",
+    )
+    service_name: Optional[str] = Field(
+        default=None,
+        description="Optional backward-compatible alias for root_service",
+    )
+    critical_path_ms: Optional[float] = Field(
+        default=None,
+        description="Optional backward-compatible alias for active_execution_ms",
+    )
