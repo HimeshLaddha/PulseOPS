@@ -174,5 +174,9 @@ class TraceTreeResponse(BaseModel):
     )
     critical_path_ms: Optional[float] = Field(
         default=None,
-        description="Optional backward-compatible alias for active_execution_ms",
+        deprecated=True,
+        description=(
+            "DEPRECATED: Use 'active_execution_ms' instead. Mirrors active_execution_ms "
+            "for backward compatibility and will be removed in a future release."
+        ),
     )

@@ -433,6 +433,34 @@ def _compute_longest_path_duration_ms(top_nodes: list[SpanTreeNode]) -> float:
     return round(max_path_ms, 6)
 
 
+def _is_ancestor(
+    potential_ancestor_id: str,
+    start_node_id: str,
+    node_map: dict[str, SpanTreeNode],
+) -> bool:
+    """
+    Traverse parent links upward starting from start_node_id to determine if
+    potential_ancestor_id is already an ancestor.
+    Returns True if potential_ancestor_id is encountered, preventing cyclic graph edges.
+    """
+    curr_id: Optional[str] = start_node_id
+    visited: set[str] = set()
+
+    while curr_id and curr_id in node_map:
+        if curr_id == potential_ancestor_id:
+            return True
+        if curr_id in visited:
+            break
+        visited.add(curr_id)
+        parent_id = node_map[curr_id].parent_span_id
+        if not parent_id or parent_id == curr_id:
+            break
+        curr_id = parent_id
+
+    return False
+
+
+
 @app.get(
     "/v1/traces/{trace_id}/tree",
     response_model=TraceTreeResponse,
@@ -496,7 +524,7 @@ async def get_trace_tree(
         if s["end_time_unix_nano"] > max_end:
             max_end = s["end_time_unix_nano"]
 
-    # 2. Iterative Graph Construction in O(N)
+    # 2. Iterative Graph Construction in O(N) with cycle prevention
     roots: list[SpanTreeNode] = []
     orphans: list[SpanTreeNode] = []
 
@@ -505,8 +533,12 @@ async def get_trace_tree(
         parent_id = node.parent_span_id
         if parent_id is None:
             roots.append(node)
-        elif parent_id in node_map and parent_id != node.span_id:
-            node_map[parent_id].children.append(node)
+        elif parent_id in node_map:
+            if _is_ancestor(node.span_id, parent_id, node_map):
+                # Cycle detected: break edge to maintain acyclic DAG and route to orphans
+                orphans.append(node)
+            else:
+                node_map[parent_id].children.append(node)
         else:
             orphans.append(node)
 

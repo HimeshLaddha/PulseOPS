@@ -292,3 +292,66 @@ def test_missing_trace_returns_404(client):
     # Invalid regex trace_id returns 422
     resp_422 = client.get("/v1/traces/too-short/tree")
     assert resp_422.status_code == 422
+
+
+def test_trace_tree_mutual_two_span_cycle(client):
+    """
+    Test verifying that a 2-span mutual cycle (A -> B -> A) is broken gracefully,
+    routed to orphans without cyclic children references, and serializes cleanly
+    with HTTP 200 without triggering a RecursionError.
+    """
+    trace_id = uuid.uuid4().hex
+    span_a_id = "5000000000000001"
+    span_b_id = "5000000000000002"
+
+    payload = {
+        "service_name": "cycle-service",
+        "spans": [
+            {
+                "span_id": span_a_id,
+                "trace_id": trace_id,
+                "parent_span_id": span_b_id,  # A points to B
+                "operation_name": "cycle_op_a",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_040_000_000,  # 40 ms
+                "status_code": "OK",
+            },
+            {
+                "span_id": span_b_id,
+                "trace_id": trace_id,
+                "parent_span_id": span_a_id,  # B points to A (mutual cycle)
+                "operation_name": "cycle_op_b",
+                "start_time_unix_nano": 1_000_020_000_000,
+                "end_time_unix_nano": 1_000_060_000_000,  # 40 ms
+                "status_code": "OK",
+            },
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    # Request tree endpoint; must not throw RecursionError and return HTTP 200
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 2
+    assert tree["roots"] == []
+    assert len(tree["orphans"]) == 2
+
+    # Verify both spans are in orphans with empty children (acyclic guarantee)
+    orphan_ids = {n["span_id"] for n in tree["orphans"]}
+    assert orphan_ids == {span_a_id, span_b_id}
+    for n in tree["orphans"]:
+        assert n["children"] == []
+        assert n["depth"] == 0
+
+    # Verify metrics computed cleanly
+    assert tree["max_depth"] == 0
+    # Merged union: [0, 40] U [20, 60] = [0, 60] -> 60 ms
+    assert tree["active_execution_ms"] == 60.0
+    assert tree["wall_clock_duration_ms"] == 60.0
+    assert tree["longest_path_duration_ms"] == 40.0
+    assert tree["critical_path_ms"] == 60.0

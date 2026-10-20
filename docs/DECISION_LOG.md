@@ -182,36 +182,40 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
 
 ---
 
-## ADR-006: Iterative Trace DAG Assembly & Metric Disambiguation
+## ADR-005: Iterative Trace DAG Assembly, Metric Disambiguation & Deprecation Path
 
 - **Status:** ACCEPTED
-- **Date:** 2026-10-19
+- **Date:** 2026-10-20
 - **Context:**
   Distributed traces consist of spans linked by `parent_span_id` with execution intervals defined by integer nanosecond timestamps `[start_time_unix_nano, end_time_unix_nano]`.
   When consuming traces, user-facing telemetry visualization tools and diagnostic workflows require structured DAG/tree hierarchies rather than flat span lists. In addition:
   1. Spans can arrive out of order, or parent spans may be delayed or omitted, producing orphaned spans referencing nonexistent parents.
-  2. Concurrent or fan-out operations produce parallel branches where naive summation of span durations grossly exaggerates true wall-clock execution duration.
-  3. Timing metrics must be strictly disambiguated between wall-clock envelope, disjoint active execution time, and causal critical path length.
-  4. Graph traversal must remain strictly iterative to avoid Python call-stack exhaustion on deep or malformed hierarchies.
-  5. The API must maintain strict backwards compatibility with existing `GET /v1/traces/{trace_id}` flat responses.
+  2. Malformed or cyclic client spans (such as mutual 2-span loops `A -> B -> A` or self-referencing spans) can create reference cycles in `SpanTreeNode.children`, causing recursive serialization failure (`RecursionError`) during response delivery.
+  3. Concurrent or fan-out operations produce parallel branches where naive summation of span durations grossly exaggerates true wall-clock execution duration.
+  4. Timing metrics must be strictly disambiguated between overall span envelope, disjoint active execution time, and causal critical path length.
+  5. The API must maintain backward compatibility with existing consumers while establishing a formal deprecation schedule for ambiguous legacy metric names (`critical_path_ms`).
 
 - **Decision:**
-  1. **Iterative Graph Construction ($O(N)$ Time Complexity):**
+  1. **DAG Acyclicity Enforcement & Iterative Graph Construction ($O(N)$ Time Complexity):**
      - Expose `GET /v1/traces/{trace_id}/tree` returning `TraceTreeResponse`.
      - In-memory node index (`node_map`) maps `span_id` to `SpanTreeNode`.
      - Spans with `parent_span_id is None` are appended to `roots`.
-     - Spans with valid parents are appended to `parent.children`.
-     - Missing-parent references are categorized into `orphans` without throwing exceptions or dropping nodes.
-     - Isolated cycles are captured via an iterative reachability sweep and safely isolated in `orphans`.
+     - Before adding `node` into `node_map[parent_id].children`, execute `_is_ancestor(node.span_id, parent_id, node_map)` traversing parent links upward. If a cycle is detected, the edge is rejected and the node is routed directly to `orphans`, ensuring `children` references remain strictly acyclic.
+     - Spans referencing missing parents or cycle boundaries are routed to `orphans` without throwing exceptions or dropping spans.
   2. **Iterative BFS Depth Calculation:**
      - Assigns 0-indexed `depth` (`root=0`) using an iterative BFS queue over `roots` and `orphans` to avoid Python call-stack limits.
      - Computes `max_depth` across all reachable nodes.
   3. **Disambiguated Timing Metrics:**
-     - **`wall_clock_duration_ms`**: Total trace envelope $\frac{\max(\text{end}) - \min(\text{start})}{10^6}$.
-     - **`active_execution_ms`**: Disjoint interval union across all spans, merging overlapping parallel branches to prevent double-counting while preserving idle gaps.
+     - **`wall_clock_duration_ms`**: Overall span envelope $\frac{\max(\text{end}) - \min(\text{start})}{10^6}$.
+     - **`active_execution_ms`**: Disjoint interval union across all spans, merging overlapping concurrent branches to prevent double-counting while preserving idle gaps.
      - **`longest_path_duration_ms`**: Maximum cumulative duration along any directed root-to-leaf path computed via iterative DFS accumulating `node.duration_ms`.
+  4. **Backward Compatibility Alias & Deprecation Timeline:**
+     - `critical_path_ms` is marked with `deprecated=True` in `TraceTreeResponse` and OpenAPI schema.
+     - `critical_path_ms` mirrors `active_execution_ms` dynamically for full backward compatibility with early Day 7 callers.
+     - **Deprecation Timeline:** Supported through Day 8; scheduled for formal removal in Day 9 release.
 
 - **Consequences:**
-  - Backwards compatibility is preserved for `GET /v1/traces/{trace_id}`.
+  - Full backward compatibility is preserved for both flat `GET /v1/traces/{trace_id}` and early tree callers.
   - Ingestion and query schemas remain strongly typed via Pydantic V2 models (`SpanTreeNode`, `TraceTreeResponse`).
+  - Recursive serialization failures from client cycles are eliminated; graph structure is guaranteed acyclic.
   - Trace DAG construction and timing metrics run in $O(N)$ (and $O(N \log N)$ interval union sort), fully verified with unit and integration tests in `backend/tests/test_trace_tree.py`.
