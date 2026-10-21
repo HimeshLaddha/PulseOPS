@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, Optional
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, Path, Query, Request, status
+from fastapi import FastAPI, HTTPException, Path, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -460,6 +460,70 @@ def _is_ancestor(
     return False
 
 
+def _serialize_tree_nodes_iterative(nodes: list[SpanTreeNode]) -> str:
+    """
+    Iterative string builder for a list of SpanTreeNodes.
+    Serializes deeply nested tree hierarchies without call-stack recursion,
+    guaranteeing bounded memory and eliminating Python and Pydantic recursion limits.
+    """
+    out: list[str] = ["["]
+    for top_idx, top_node in enumerate(nodes):
+        if top_idx > 0:
+            out.append(",")
+        stack: list[list[Any]] = [[top_node, 0]]
+        while stack:
+            curr, c_idx = stack[-1]
+            if c_idx == 0:
+                base = {
+                    "span_id": curr.span_id,
+                    "trace_id": curr.trace_id,
+                    "parent_span_id": curr.parent_span_id,
+                    "service_name": curr.service_name,
+                    "operation_name": curr.operation_name,
+                    "start_time_unix_nano": curr.start_time_unix_nano,
+                    "end_time_unix_nano": curr.end_time_unix_nano,
+                    "duration_ms": curr.duration_ms,
+                    "status_code": curr.status_code,
+                    "attributes": curr.attributes,
+                    "depth": curr.depth,
+                }
+                s = json.dumps(base)[:-1]
+                out.append(s + ',"children":[')
+            if c_idx < len(curr.children):
+                if c_idx > 0:
+                    out.append(",")
+                child = curr.children[c_idx]
+                stack[-1][1] += 1
+                stack.append([child, 0])
+            else:
+                out.append("]}")
+                stack.pop()
+    out.append("]")
+    return "".join(out)
+
+
+def _serialize_trace_tree_response(res: TraceTreeResponse) -> str:
+    """Iteratively serialize a TraceTreeResponse to JSON string."""
+    roots_json = _serialize_tree_nodes_iterative(res.roots)
+    orphans_json = _serialize_tree_nodes_iterative(res.orphans)
+    service_name_val = f'"{res.service_name}"' if res.service_name else "null"
+    raw_crit = res.__dict__.get("critical_path_ms")
+    crit_path_val = f"{raw_crit}" if raw_crit is not None else "null"
+    return (
+        f'{{"trace_id":{json.dumps(res.trace_id)},'
+        f'"root_service":{json.dumps(res.root_service)},'
+        f'"span_count":{res.span_count},'
+        f'"max_depth":{res.max_depth},'
+        f'"wall_clock_duration_ms":{res.wall_clock_duration_ms},'
+        f'"active_execution_ms":{res.active_execution_ms},'
+        f'"longest_path_duration_ms":{res.longest_path_duration_ms},'
+        f'"roots":{roots_json},'
+        f'"orphans":{orphans_json},'
+        f'"service_name":{service_name_val},'
+        f'"critical_path_ms":{crit_path_val}}}'
+    )
+
+
 
 @app.get(
     "/v1/traces/{trace_id}/tree",
@@ -478,13 +542,24 @@ async def get_trace_tree(
     ],
 ):
     """
-    Retrieve all spans for a trace assembled into an iterative DAG hierarchy / tree:
-    - O(N) iterative tree construction linking children via parent_span_id.
-    - Missing-parent references are categorized into orphans without crashing.
-    - Iterative BFS assigns 0-indexed depth (root=0) and computes max_depth.
-    - active_execution_ms computed via interval-union merging of overlapping spans.
-    - longest_path_duration_ms computed via iterative DFS accumulating root-to-leaf durations.
-    - wall_clock_duration_ms computed as overall span envelope (max(end) - min(start)).
+    Retrieve all spans for a trace assembled into an iterative DAG hierarchy / tree.
+
+    Formal Time and Space Complexity Guarantees:
+    - Building the node map: O(N) time, O(N) space.
+    - Cycle detection via ancestor walk: O(N * D) worst-case time (where D is tree depth),
+      bounded by O(N^2) on pathological linear inputs, or O(N) with visited markers; O(N) space.
+    - Interval union (active_execution_ms): O(N log N) time for sorting intervals, O(N) space.
+    - Longest path calculation (longest_path_duration_ms): O(N) time on a tree/DAG without
+      cross-branch cycles, O(N) space using iterative DFS stack.
+    - Iterative BFS depth assignment: O(N) time, O(N) space.
+    - Overall complexity: O(N log N) time for normal workloads, O(N^2) worst-case on degenerate
+      linear chains, O(N) space.
+
+    Defensive Invariants:
+    - Children references form a strict acyclic forest (zero RecursionError during Pydantic serialization).
+    - Self-loops (parent_span_id == span_id), 2-node mutual loops, and multi-node cycles are
+      broken and routed directly to orphans.
+    - Missing parent references are categorized into orphans without throwing exceptions.
     - Returns HTTP 404 if trace does not exist.
     """
     pool = get_db_pool()
@@ -533,6 +608,9 @@ async def get_trace_tree(
         parent_id = node.parent_span_id
         if parent_id is None:
             roots.append(node)
+        elif parent_id == node.span_id:
+            # Self-parent loop guard: break self-reference and route directly to orphans
+            orphans.append(node)
         elif parent_id in node_map:
             if _is_ancestor(node.span_id, parent_id, node_map):
                 # Cycle detected: break edge to maintain acyclic DAG and route to orphans
@@ -589,7 +667,7 @@ async def get_trace_tree(
 
     root_service = roots[0].service_name if roots else spans[0]["service_name"]
 
-    return TraceTreeResponse(
+    tree_response = TraceTreeResponse(
         trace_id=trace_id,
         root_service=root_service,
         span_count=len(spans),
@@ -601,4 +679,9 @@ async def get_trace_tree(
         orphans=orphans,
         service_name=root_service,
         critical_path_ms=active_execution_ms,
+    )
+
+    return Response(
+        content=_serialize_trace_tree_response(tree_response),
+        media_type="application/json",
     )

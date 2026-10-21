@@ -196,26 +196,29 @@ In Day 3 benchmarks, enqueuing to Redis was fast, but the single consumer worker
   5. The API must maintain backward compatibility with existing consumers while establishing a formal deprecation schedule for ambiguous legacy metric names (`critical_path_ms`).
 
 - **Decision:**
-  1. **DAG Acyclicity Enforcement & Iterative Graph Construction ($O(N)$ Time Complexity):**
+  1. **DAG Acyclicity Enforcement & Iterative Graph Construction:**
      - Expose `GET /v1/traces/{trace_id}/tree` returning `TraceTreeResponse`.
-     - In-memory node index (`node_map`) maps `span_id` to `SpanTreeNode`.
-     - Spans with `parent_span_id is None` are appended to `roots`.
-     - Before adding `node` into `node_map[parent_id].children`, execute `_is_ancestor(node.span_id, parent_id, node_map)` traversing parent links upward. If a cycle is detected, the edge is rejected and the node is routed directly to `orphans`, ensuring `children` references remain strictly acyclic.
-     - Spans referencing missing parents or cycle boundaries are routed to `orphans` without throwing exceptions or dropping spans.
-  2. **Iterative BFS Depth Calculation:**
-     - Assigns 0-indexed `depth` (`root=0`) using an iterative BFS queue over `roots` and `orphans` to avoid Python call-stack limits.
-     - Computes `max_depth` across all reachable nodes.
+     - In-memory node index (`node_map`) maps `span_id` to `SpanTreeNode` in $O(N)$ time and space.
+     - Spans with `parent_span_id is None` are appended to `roots` (depth=0).
+     - Spans with `parent_span_id == span_id` (self-loops) are caught immediately in $O(1)$ and routed to `orphans` in clean detached state.
+     - For other parent references, execute `_is_ancestor(node.span_id, parent_id, node_map)` traversing parent links upward. If a cycle is detected (mutual 2-span cycle or multi-node loop `A -> B -> C -> A`), the edge is severed and the node is routed directly to `orphans`, ensuring `children` references remain a strict acyclic forest.
+     - Spans referencing nonexistent parent IDs are safely categorized into `orphans` without crashing.
+  2. **Iterative Traversal & Deep Trace Stack Safety:**
+     - **Iterative BFS Depth Calculation:** Assigns 0-indexed `depth` (`root=0`) using an indexed BFS queue over `roots` and `orphans` to avoid Python call-stack limits ($O(N)$ time, $O(N)$ space).
+     - **Iterative DFS Longest-Path Duration:** Computes maximum cumulative path duration using an explicit array stack, eliminating recursive function calls ($O(N)$ time, $O(N)$ space).
+     - **Iterative JSON Serialization:** Implements `_serialize_trace_tree_response` using an explicit DFS stack to serialize `TraceTreeResponse` directly to JSON. This eliminates `RecursionError` and `Circular reference detected (depth exceeded)` encountered when standard Pydantic-core or Python JSON serializers process 500+ sequentially nested objects.
   3. **Disambiguated Timing Metrics:**
      - **`wall_clock_duration_ms`**: Overall span envelope $\frac{\max(\text{end}) - \min(\text{start})}{10^6}$.
-     - **`active_execution_ms`**: Disjoint interval union across all spans, merging overlapping concurrent branches to prevent double-counting while preserving idle gaps.
+     - **`active_execution_ms`**: Disjoint interval union across all spans in $O(N \log N)$ time, merging overlapping concurrent branches to prevent double-counting while preserving idle gaps.
      - **`longest_path_duration_ms`**: Maximum cumulative duration along any directed root-to-leaf path computed via iterative DFS accumulating `node.duration_ms`.
   4. **Backward Compatibility Alias & Deprecation Timeline:**
      - `critical_path_ms` is marked with `deprecated=True` in `TraceTreeResponse` and OpenAPI schema.
-     - `critical_path_ms` mirrors `active_execution_ms` dynamically for full backward compatibility with early Day 7 callers.
-     - **Deprecation Timeline:** Supported through Day 8; scheduled for formal removal in Day 9 release.
+     - `critical_path_ms` dynamically mirrors `active_execution_ms` for backward compatibility with early callers, but does NOT represent the longest causal path.
+     - **Deprecation Timeline:** Maintained through Day 8; scheduled for formal removal in Day 9 / v1.1 release.
 
 - **Consequences:**
   - Full backward compatibility is preserved for both flat `GET /v1/traces/{trace_id}` and early tree callers.
   - Ingestion and query schemas remain strongly typed via Pydantic V2 models (`SpanTreeNode`, `TraceTreeResponse`).
   - Recursive serialization failures from client cycles are eliminated; graph structure is guaranteed acyclic.
-  - Trace DAG construction and timing metrics run in $O(N)$ (and $O(N \log N)$ interval union sort), fully verified with unit and integration tests in `backend/tests/test_trace_tree.py`.
+  - Deep traces with 500+ sequentially nested spans serialize cleanly with bounded memory and zero `RecursionError`.
+  - Trace DAG construction and timing metrics run in $O(N)$ (and $O(N \log N)$ interval union sort), fully verified with unit and integration tests across all 8 edge cases in `backend/tests/test_trace_tree.py`.

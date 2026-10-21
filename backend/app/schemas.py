@@ -150,23 +150,27 @@ class TraceTreeResponse(BaseModel):
     )
     wall_clock_duration_ms: float = Field(
         ...,
-        description="Overall span envelope duration in ms: max(end) - min(start)",
+        description="Overall span envelope duration in ms: (max(end_time_unix_nano) - min(start_time_unix_nano)) / 1e6",
     )
     active_execution_ms: float = Field(
         ...,
-        description="Total disjoint active execution duration in ms via interval-union merging",
+        description=(
+            "Total active execution duration in ms: union of non-overlapping time "
+            "intervals [start, end] across all spans (concurrent segments counted only once; "
+            "idle gaps excluded)"
+        ),
     )
     longest_path_duration_ms: float = Field(
         ...,
-        description="Maximum cumulative duration in ms along any directed root-to-leaf path",
+        description="Maximum cumulative span duration in ms along any single causal root-to-leaf path in the tree hierarchy",
     )
     roots: list[SpanTreeNode] = Field(
         default_factory=list,
-        description="Root spans with no parent_span_id",
+        description="Root spans with no parent_span_id (depth=0)",
     )
     orphans: list[SpanTreeNode] = Field(
         default_factory=list,
-        description="Spans referencing parent_span_ids not present in this trace",
+        description="Spans referencing parent_span_ids not present in this trace, or detached due to cycle breaking",
     )
     service_name: Optional[str] = Field(
         default=None,
@@ -176,7 +180,8 @@ class TraceTreeResponse(BaseModel):
         default=None,
         deprecated=True,
         description=(
-            "DEPRECATED: Use 'active_execution_ms' instead. Mirrors active_execution_ms "
-            "for backward compatibility and will be removed in a future release."
+            "DEPRECATED: Use 'active_execution_ms' or 'longest_path_duration_ms' instead. "
+            "Dynamically mirrors 'active_execution_ms' for backward compatibility, but does "
+            "NOT represent the longest causal path. Scheduled for formal removal in Day 9 / v1.1."
         ),
     )

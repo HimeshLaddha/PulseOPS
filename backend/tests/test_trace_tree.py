@@ -9,6 +9,9 @@ BACKEND_DIR = os.path.dirname(SCRIPT_DIR)
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
+# Ensure client-side test JSON parser can handle 500+ sequentially nested test trees
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 5000))
+
 from app.main import app
 
 
@@ -355,3 +358,449 @@ def test_trace_tree_mutual_two_span_cycle(client):
     assert tree["wall_clock_duration_ms"] == 60.0
     assert tree["longest_path_duration_ms"] == 40.0
     assert tree["critical_path_ms"] == 60.0
+
+
+def test_trace_tree_self_parent(client):
+    """
+    Test Matrix 1: Self-Parent span where parent_span_id == span_id.
+    Must not loop infinitely or cause RecursionError; routed directly to orphans.
+    """
+    trace_id = uuid.uuid4().hex
+    self_span_id = "6000000000000001"
+
+    payload = {
+        "service_name": "self-loop-service",
+        "spans": [
+            {
+                "span_id": self_span_id,
+                "trace_id": trace_id,
+                "parent_span_id": self_span_id,  # Self-reference
+                "operation_name": "self_loop_op",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_025_000_000,  # 25 ms
+                "status_code": "OK",
+            }
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 1
+    assert tree["roots"] == []
+    assert len(tree["orphans"]) == 1
+
+    orphan_node = tree["orphans"][0]
+    assert orphan_node["span_id"] == self_span_id
+    assert orphan_node["parent_span_id"] == self_span_id
+    assert orphan_node["children"] == []
+    assert orphan_node["depth"] == 0
+    assert tree["max_depth"] == 0
+    assert tree["wall_clock_duration_ms"] == 25.0
+    assert tree["active_execution_ms"] == 25.0
+    assert tree["longest_path_duration_ms"] == 25.0
+
+
+def test_trace_tree_multi_node_cycle(client):
+    """
+    Test Matrix 3: Multi-Node Cycle: A -> B -> C -> A.
+    Cycle must be detected and broken, all cyclic nodes safely categorized
+    into orphans, zero cycle in children, serializing with HTTP 200.
+    """
+    trace_id = uuid.uuid4().hex
+    span_a_id = "6100000000000001"
+    span_b_id = "6100000000000002"
+    span_c_id = "6100000000000003"
+
+    payload = {
+        "service_name": "multi-cycle-service",
+        "spans": [
+            {
+                "span_id": span_a_id,
+                "trace_id": trace_id,
+                "parent_span_id": span_c_id,  # A -> C
+                "operation_name": "multi_cycle_a",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_030_000_000,  # 30 ms
+                "status_code": "OK",
+            },
+            {
+                "span_id": span_b_id,
+                "trace_id": trace_id,
+                "parent_span_id": span_a_id,  # B -> A
+                "operation_name": "multi_cycle_b",
+                "start_time_unix_nano": 1_000_010_000_000,
+                "end_time_unix_nano": 1_000_040_000_000,  # 30 ms
+                "status_code": "OK",
+            },
+            {
+                "span_id": span_c_id,
+                "trace_id": trace_id,
+                "parent_span_id": span_b_id,  # C -> B
+                "operation_name": "multi_cycle_c",
+                "start_time_unix_nano": 1_000_020_000_000,
+                "end_time_unix_nano": 1_000_050_000_000,  # 30 ms
+                "status_code": "OK",
+            },
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 3
+    assert tree["roots"] == []
+    assert len(tree["orphans"]) == 3
+
+    # All nodes are preserved in orphans without cycles in children
+    orphan_ids = {n["span_id"] for n in tree["orphans"]}
+    assert orphan_ids == {span_a_id, span_b_id, span_c_id}
+    for n in tree["orphans"]:
+        assert n["children"] == []
+        assert n["depth"] == 0
+
+    assert tree["max_depth"] == 0
+    # Merged union: [0, 30] U [10, 40] U [20, 50] = [0, 50] -> 50 ms
+    assert tree["active_execution_ms"] == 50.0
+    assert tree["wall_clock_duration_ms"] == 50.0
+    assert tree["longest_path_duration_ms"] == 30.0
+    assert tree["critical_path_ms"] == 50.0
+
+
+def test_trace_tree_missing_parent(client):
+    """
+    Test Matrix 4: Missing Parent: Span referencing a non-existent parent span ID.
+    Must be routed directly to orphans without dropping spans or throwing 500 errors.
+    """
+    trace_id = uuid.uuid4().hex
+    orphan_id = "6200000000000001"
+    non_existent_parent = "eeeeeeeeeeeeeeee"
+
+    payload = {
+        "service_name": "missing-parent-service",
+        "spans": [
+            {
+                "span_id": orphan_id,
+                "trace_id": trace_id,
+                "parent_span_id": non_existent_parent,
+                "operation_name": "detached_span",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_020_000_000,  # 20 ms
+                "status_code": "OK",
+            }
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 1
+    assert tree["roots"] == []
+    assert len(tree["orphans"]) == 1
+    assert tree["orphans"][0]["span_id"] == orphan_id
+    assert tree["orphans"][0]["parent_span_id"] == non_existent_parent
+    assert tree["orphans"][0]["children"] == []
+    assert tree["orphans"][0]["depth"] == 0
+
+
+def test_trace_tree_multiple_independent_roots(client):
+    """
+    Test Matrix 5: Multiple Independent Roots: 3 distinct roots with parent_span_id=None,
+    each with their own child subtree.
+    All roots must appear in roots list at depth=0, each with their respective children at depth=1.
+    """
+    trace_id = uuid.uuid4().hex
+    r1_id = "6300000000000001"
+    c1_id = "6300000000000002"
+    r2_id = "6300000000000003"
+    c2_id = "6300000000000004"
+    r3_id = "6300000000000005"
+    c3_id = "6300000000000006"
+
+    payload = {
+        "service_name": "multi-root-service",
+        "spans": [
+            # Root 1 + Child 1
+            {
+                "span_id": r1_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "root_1",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_010_000_000,  # 10 ms
+                "status_code": "OK",
+            },
+            {
+                "span_id": c1_id,
+                "trace_id": trace_id,
+                "parent_span_id": r1_id,
+                "operation_name": "child_1",
+                "start_time_unix_nano": 1_000_010_000_000,
+                "end_time_unix_nano": 1_000_020_000_000,  # 10 ms
+                "status_code": "OK",
+            },
+            # Root 2 + Child 2
+            {
+                "span_id": r2_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "root_2",
+                "start_time_unix_nano": 1_000_020_000_000,
+                "end_time_unix_nano": 1_000_030_000_000,  # 10 ms
+                "status_code": "OK",
+            },
+            {
+                "span_id": c2_id,
+                "trace_id": trace_id,
+                "parent_span_id": r2_id,
+                "operation_name": "child_2",
+                "start_time_unix_nano": 1_000_030_000_000,
+                "end_time_unix_nano": 1_000_040_000_000,  # 10 ms
+                "status_code": "OK",
+            },
+            # Root 3 + Child 3
+            {
+                "span_id": r3_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "root_3",
+                "start_time_unix_nano": 1_000_040_000_000,
+                "end_time_unix_nano": 1_000_050_000_000,  # 10 ms
+                "status_code": "OK",
+            },
+            {
+                "span_id": c3_id,
+                "trace_id": trace_id,
+                "parent_span_id": r3_id,
+                "operation_name": "child_3",
+                "start_time_unix_nano": 1_000_050_000_000,
+                "end_time_unix_nano": 1_000_060_000_000,  # 10 ms
+                "status_code": "OK",
+            },
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 6
+    assert tree["max_depth"] == 1
+    assert tree["orphans"] == []
+
+    # Exactly 3 roots, all at depth=0
+    assert len(tree["roots"]) == 3
+    root_ids = {r["span_id"] for r in tree["roots"]}
+    assert root_ids == {r1_id, r2_id, r3_id}
+
+    for root_node in tree["roots"]:
+        assert root_node["depth"] == 0
+        assert len(root_node["children"]) == 1
+        child_node = root_node["children"][0]
+        assert child_node["depth"] == 1
+        assert child_node["children"] == []
+
+
+def test_trace_tree_deeply_nested_500_spans(client):
+    """
+    Test Matrix 6: Deeply Nested Trace with 500 sequential child spans
+    (Root -> S1 -> S2 -> ... -> S500).
+    Guarantees iterative traversal achieves max_depth = 500 without call-stack
+    exhaustion (RecursionError) and serializes cleanly under bounded memory.
+    """
+    trace_id = uuid.uuid4().hex
+    root_id = "7000000000000000"
+
+    spans = [
+        {
+            "span_id": root_id,
+            "trace_id": trace_id,
+            "parent_span_id": None,
+            "operation_name": "deep_root",
+            "start_time_unix_nano": 1_000_000_000_000,
+            "end_time_unix_nano": 1_000_001_000_000,  # 1 ms
+            "status_code": "OK",
+        }
+    ]
+
+    prev_id = root_id
+    base_time = 1_000_001_000_000
+    for i in range(1, 501):
+        curr_id = f"7{i:015d}"
+        spans.append(
+            {
+                "span_id": curr_id,
+                "trace_id": trace_id,
+                "parent_span_id": prev_id,
+                "operation_name": f"nested_child_{i}",
+                "start_time_unix_nano": base_time + (i - 1) * 1_000_000,
+                "end_time_unix_nano": base_time + i * 1_000_000,  # 1 ms each
+                "status_code": "OK",
+            }
+        )
+        prev_id = curr_id
+
+    payload = {
+        "service_name": "deep-nesting-service",
+        "spans": spans,
+    }
+
+    # Ingest 501 spans in a single atomic batch
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    # Query DAG Tree endpoint
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 501
+    assert tree["max_depth"] == 500
+    assert len(tree["roots"]) == 1
+    assert tree["orphans"] == []
+
+    # Verify metrics: 501 spans of 1ms each in sequential order
+    assert tree["wall_clock_duration_ms"] == 501.0
+    assert tree["active_execution_ms"] == 501.0
+    assert tree["longest_path_duration_ms"] == 501.0
+
+
+def test_trace_tree_metric_semantics(client):
+    """
+    Test Matrix 7: Metric Semantics Verification:
+    Root (0 to 100ms, dur 100ms),
+    Child 1 (10 to 40ms, dur 30ms, parent=Root),
+    Child 2 (30 to 80ms, dur 50ms, parent=Root).
+
+    Assert:
+    - wall_clock_duration_ms == 100.0 (overall span envelope)
+    - active_execution_ms == 100.0 (all sub-spans covered by root)
+    - longest_path_duration_ms == 150.0 (Root 100ms + Child 2 50ms)
+    - critical_path_ms == 100.0 (backward-compatibility alias mirroring active_execution_ms)
+    """
+    trace_id = uuid.uuid4().hex
+    root_id = "8000000000000001"
+    child1_id = "8000000000000002"
+    child2_id = "8000000000000003"
+
+    payload = {
+        "service_name": "metric-semantics-service",
+        "spans": [
+            {
+                "span_id": root_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "root_operation",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_100_000_000,  # 100 ms (0 to 100ms)
+                "status_code": "OK",
+            },
+            {
+                "span_id": child1_id,
+                "trace_id": trace_id,
+                "parent_span_id": root_id,
+                "operation_name": "child_op_1",
+                "start_time_unix_nano": 1_000_010_000_000,  # 10ms
+                "end_time_unix_nano": 1_000_040_000_000,    # 40ms (30ms duration)
+                "status_code": "OK",
+            },
+            {
+                "span_id": child2_id,
+                "trace_id": trace_id,
+                "parent_span_id": root_id,
+                "operation_name": "child_op_2",
+                "start_time_unix_nano": 1_000_030_000_000,  # 30ms
+                "end_time_unix_nano": 1_000_080_000_000,    # 80ms (50ms duration)
+                "status_code": "OK",
+            },
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 3
+    assert tree["max_depth"] == 1
+    assert len(tree["roots"]) == 1
+    assert len(tree["roots"][0]["children"]) == 2
+
+    # Metric asserts per specification
+    assert tree["wall_clock_duration_ms"] == 100.0
+    assert tree["active_execution_ms"] == 100.0
+    assert tree["longest_path_duration_ms"] == 150.0
+    assert tree["critical_path_ms"] == 100.0
+
+
+def test_trace_tree_disjoint_idle_gaps(client):
+    """
+    Test Matrix 8: Disjoint Idle Gaps:
+    Two disjoint spans: 0 to 10ms and 90 to 100ms.
+    Assert wall_clock_duration_ms == 100.0 and active_execution_ms == 20.0
+    (verifying that 80ms of idle window is correctly excluded).
+    """
+    trace_id = uuid.uuid4().hex
+    span1_id = "9000000000000001"
+    span2_id = "9000000000000002"
+
+    payload = {
+        "service_name": "idle-gap-service",
+        "spans": [
+            {
+                "span_id": span1_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "early_op",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_010_000_000,  # 10 ms (0 to 10ms)
+                "status_code": "OK",
+            },
+            {
+                "span_id": span2_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "late_op",
+                "start_time_unix_nano": 1_000_090_000_000,  # 90ms
+                "end_time_unix_nano": 1_000_100_000_000,   # 100ms (10 ms)
+                "status_code": "OK",
+            },
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+    tree = resp.json()
+
+    assert tree["trace_id"] == trace_id
+    assert tree["span_count"] == 2
+    assert tree["wall_clock_duration_ms"] == 100.0
+    assert tree["active_execution_ms"] == 20.0
+    assert tree["longest_path_duration_ms"] == 10.0
+    assert tree["critical_path_ms"] == 20.0

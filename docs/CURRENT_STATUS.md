@@ -1,8 +1,8 @@
 # PulseOps — Current Status
 
-**Active Phase:** Day 7 Phase 1: Trace Tree Assembly & DAG Endpoint — **COMPLETE**<br>
-**Last Updated:** 2026-10-19<br>
-**Current Active Checkpoint:** Day 7 Phase 1 Trace DAG Assembly Verified
+**Active Phase:** Day 7: Trace Tree Correctness & Defensive Hardening — **COMPLETE**<br>
+**Last Updated:** 2026-10-21<br>
+**Current Active Checkpoint:** Day 7 Trace Tree Correctness & Defensive Hardening Verified
 
 ---
 
@@ -122,11 +122,26 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
     - Client-observed commit duration ($T_{3\text{c}}$) remained stable: **4.91 ms** (1 worker) vs **4.16 ms** (2 workers) vs **4.19 ms** (4 workers).
     - Stable query timings are consistent with minimal database lock contention under this workload, suggesting per-connection query latency behaves independently; internal lock contention and WAL fsync behaviors remain working hypotheses requiring deeper engine-level instrumentation.
   - **Database Correctness:** Exactly 50,000 / 50,000 spans persisted in every run with **0 duplicates and 0 lost spans** verified via primary key constraint check.
-- [x] **Day 7 Phase 1: Trace Tree Assembly & DAG Endpoint:**
+- [x] **Day 7: Trace Tree Correctness & Defensive Hardening:**
   - Strongly typed Pydantic V2 models: `SpanTreeNode` and `TraceTreeResponse`.
   - Endpoint `GET /v1/traces/{trace_id}/tree` exposing assembled DAG tree hierarchy alongside backwards-compatible `GET /v1/traces/{trace_id}`.
-  - $O(N)$ tree construction linking parent-child spans via `parent_span_id`.
-  - Non-crashing orphan categorization isolating missing or detached parent spans into `orphans`.
-  - Accurate critical path duration calculation via interval-union merging, preventing naive summation distortion across concurrent branches while respecting disjoint idle gaps.
-  - Cycle-safe `max_depth` calculation.
-  - 100% test coverage across linear, branched, orphan, and 404/422 validation cases in `backend/tests/test_trace_tree.py`.
+  - Formal complexity guarantees:
+    - Node map index: $O(N)$ time, $O(N)$ space.
+    - Cycle detection via ancestor walk: $O(N \cdot D)$ time ($O(N^2)$ worst-case on linear degenerate chains), $O(N)$ space.
+    - Interval union (`active_execution_ms`): $O(N \log N)$ time, $O(N)$ space.
+    - Longest path calculation (`longest_path_duration_ms`): $O(N)$ time, $O(N)$ space using iterative DFS stack.
+    - Iterative BFS depth calculation: $O(N)$ time, $O(N)$ space.
+    - Iterative JSON response serialization: $O(N)$ time, $O(N)$ space.
+  - Cycle breaking & acyclicity enforcement:
+    - Self-loops (`parent_span_id == span_id`) guarded and routed to orphans in clean detached state.
+    - Mutual loops (`A -> B -> A`) and multi-node cycles (`A -> B -> C -> A`) detected via ancestor traversal and severed, ensuring `children` forms a strict acyclic forest.
+    - Non-crashing orphan categorization isolating missing or detached parent spans into `orphans`.
+  - Deep trace stack safety:
+    - Iterative JSON serializer (`_serialize_trace_tree_response`) eliminates Python/Pydantic call-stack exhaustion on deep trees.
+    - Tested with 500+ sequentially nested spans achieving `max_depth = 500` with zero `RecursionError` and bounded memory.
+  - Metric contract definitions:
+    - `wall_clock_duration_ms`: $\frac{\max(\text{end}) - \min(\text{start})}{10^6}$ (span envelope).
+    - `active_execution_ms`: Disjoint interval union across all spans (concurrent segments counted once; idle gaps excluded).
+    - `longest_path_duration_ms`: Maximum cumulative span duration along any single causal root-to-leaf path.
+    - `critical_path_ms`: Annotated `deprecated=True`, dynamically mirroring `active_execution_ms` for backward compatibility, scheduled for removal in Day 9 / v1.1.
+  - 100% test coverage across all 8 edge-case scenarios in `backend/tests/test_trace_tree.py` (12 tests total) and all 19 tests in `backend/tests/`. All 9 fault tolerance scenarios verified.
