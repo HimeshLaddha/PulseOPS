@@ -205,11 +205,13 @@ async def insert_spans(
 
 
 async def get_spans_by_trace(
-    pool: asyncpg.Pool, trace_id: str
-) -> list[dict[str, Any]]:
+    pool: asyncpg.Pool, trace_id: str, return_timing: bool = False
+) -> Any:
     """Retrieve all spans for a specific trace_id ordered by start_time_unix_nano ASC."""
     async with pool.acquire() as conn:
+        t0 = time.perf_counter()
         rows = await conn.fetch(SELECT_TRACE_QUERY, trace_id)
+        t_db_fetch = time.perf_counter() - t0
         results = []
         for r in rows:
             attrs = r["attributes"]
@@ -232,4 +234,6 @@ async def get_spans_by_trace(
                     "attributes": dict(attrs),
                 }
             )
+        if return_timing:
+            return results, t_db_fetch
         return results

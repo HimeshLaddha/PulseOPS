@@ -563,13 +563,15 @@ async def get_trace_tree(
     - Returns HTTP 404 if trace does not exist.
     """
     pool = get_db_pool()
-    spans = await get_spans_by_trace(pool=pool, trace_id=trace_id)
+    spans, t_db_fetch = await get_spans_by_trace(pool=pool, trace_id=trace_id, return_timing=True)
 
     if not spans:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Trace {trace_id} not found",
         )
+
+    t_dag_start = time.perf_counter()
 
     # 1. Instantiate tree nodes in O(N) and collect intervals
     node_map: dict[str, SpanTreeNode] = {}
@@ -680,8 +682,20 @@ async def get_trace_tree(
         service_name=root_service,
         critical_path_ms=active_execution_ms,
     )
+    t_dag_assembly = time.perf_counter() - t_dag_start
+
+    t_ser_start = time.perf_counter()
+    serialized_content = _serialize_trace_tree_response(tree_response)
+    t_json_serialize = time.perf_counter() - t_ser_start
+
+    t_db_ms = t_db_fetch * 1000.0
+    t_dag_ms = t_dag_assembly * 1000.0
+    t_ser_ms = t_json_serialize * 1000.0
 
     return Response(
-        content=_serialize_trace_tree_response(tree_response),
+        content=serialized_content,
         media_type="application/json",
+        headers={
+            "Server-Timing": f"db;dur={t_db_ms:.3f}, dag;dur={t_dag_ms:.3f}, serialize;dur={t_ser_ms:.3f}"
+        },
     )

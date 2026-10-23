@@ -804,3 +804,53 @@ def test_trace_tree_disjoint_idle_gaps(client):
     assert tree["active_execution_ms"] == 20.0
     assert tree["longest_path_duration_ms"] == 10.0
     assert tree["critical_path_ms"] == 20.0
+
+
+def test_trace_tree_server_timing_header(client):
+    """
+    Day 8 Task 1 Test: Verify Server-Timing header in GET /v1/traces/{trace_id}/tree.
+    Format: Server-Timing: db;dur=<ms>, dag;dur=<ms>, serialize;dur=<ms>
+    """
+    import re
+
+    trace_id = uuid.uuid4().hex
+    span_id = "8888000000000001"
+
+    payload = {
+        "service_name": "timing-service",
+        "spans": [
+            {
+                "span_id": span_id,
+                "trace_id": trace_id,
+                "parent_span_id": None,
+                "operation_name": "timing_op",
+                "start_time_unix_nano": 1_000_000_000_000,
+                "end_time_unix_nano": 1_000_010_000_000,
+                "status_code": "OK",
+            }
+        ],
+    }
+
+    ingest_resp = client.post("/v1/telemetry/spans?mode=direct", json=payload)
+    assert ingest_resp.status_code == 201
+
+    resp = client.get(f"/v1/traces/{trace_id}/tree")
+    assert resp.status_code == 200
+
+    server_timing = resp.headers.get("server-timing")
+    assert server_timing is not None, "Server-Timing header missing"
+
+    match = re.search(
+        r"db;dur=([0-9.]+),\s*dag;dur=([0-9.]+),\s*serialize;dur=([0-9.]+)",
+        server_timing,
+    )
+    assert match is not None, f"Server-Timing format invalid: {server_timing}"
+
+    t_db = float(match.group(1))
+    t_dag = float(match.group(2))
+    t_ser = float(match.group(3))
+
+    assert t_db >= 0.0
+    assert t_dag >= 0.0
+    assert t_ser >= 0.0
+
