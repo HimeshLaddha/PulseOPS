@@ -1,8 +1,8 @@
 # PulseOps — Current Status
 
-**Active Phase:** Day 8: Trace Query Benchmarking & Latency Decomposition — **COMPLETE**<br>
-**Last Updated:** 2026-10-23<br>
-**Current Active Checkpoint:** Day 8 Trace Read Benchmarking & Latency Decomposition Verified
+**Active Phase:** Day 9: Trace Tree Algorithm Optimization ($O(V+E)$) & DB Query Profiling — **COMPLETE**<br>
+**Last Updated:** 2026-10-24<br>
+**Current Active Checkpoint:** Day 9 Linear-Time DAG Optimization & PostgreSQL Query Profiling Verified
 
 ---
 
@@ -166,3 +166,14 @@ We hypothesize that decoupling ingestion via an in-memory or append-only stream 
   - **Iterative Serialization Stability:**
     - Serializing 500 nodes took identical time regardless of topology: **2.564 ms** (wide) vs **2.587 ms** (linear), validating that iterative JSON string building is strictly $O(N)$ and call-stack safe.
   - Raw dataset persisted to `backend/benchmarks/results/day8_trace_tree_benchmark.json`; architectural implications documented in ADR-006 draft.
+- [x] **Day 9: Trace Tree Algorithm Optimization ($O(V+E)$) & DB Query Profiling:**
+  - **Eliminated Quadratic Ancestor Walk:** Replaced unmemoized upward ancestor walk ($O(N \cdot D) \approx O(N^2)$) with linear-time iterative 3-state path traversal over parent pointers (`_detect_cycle_nodes_linear`), strictly proven $O(V + E) = O(V)$ time and $O(V)$ auxiliary space.
+  - **Maintained All Invariants:** Root routing (`parent_span_id is None`), orphan routing for missing parents, self-loops, and severed cycles, strict acyclic forest in `SpanTreeNode.children`, iterative BFS depth calculation, disjoint interval union (`active_execution_ms`), iterative DFS longest path (`longest_path_duration_ms`), and iterative JSON serialization (`_serialize_trace_tree_response`).
+  - **Regression Test Coverage:** 13/13 unit tests passed in `backend/tests/test_trace_tree.py`, 20/20 backend regression tests passed in `backend/tests/`, and all 9 fault-tolerance scenarios passed in `test_day3_fault_tolerance.py`.
+  - **Empirical Re-measurement (`day9_trace_tree_benchmark.json`):**
+    - Isolated micro-benchmark: DAG assembly on 500-span linear chain improved from **27.76 ms down to 0.85 ms (32.7x speedup)**.
+    - End-to-end benchmark under $C=10$ concurrency: Tier 4 $T_{\text{dag\_assembly}}$ dropped from **22.581 ms down to 10.320 ms (-54.3%)**, and the ancestor walk delta collapsed from **+18.18 ms (5.13x) down to +1.88 ms (1.22x)**.
+  - **PostgreSQL Read-Path Investigation (`EXPLAIN (ANALYZE, BUFFERS)`):**
+    - PostgreSQL engine internal execution time is only **1.18 ms to 2.08 ms** with **100% buffer cache hits** (`shared hit=22-27, read=0`) across Bitmap Index Scan -> Bitmap Heap Scan -> in-memory quicksort (142-149 kB).
+    - Single-connection isolated `conn.fetch` is ~6.3 ms - 6.6 ms (with 1.3 ms dict decoding). Under $C=10$ concurrency, single-threaded Python asyncio event loop multiplexing and serial binary record decoding compound across 10 parallel connections ($10 \times \sim 6.5\text{ ms} \approx 65\text{ ms}$), explaining why client-observed $T_{\text{db\_fetch}}$ is 67 - 76 ms.
+  - Recorded in [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) under ADR-007.

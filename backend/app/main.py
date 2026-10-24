@@ -433,6 +433,71 @@ def _compute_longest_path_duration_ms(top_nodes: list[SpanTreeNode]) -> float:
     return round(max_path_ms, 6)
 
 
+def _detect_cycle_nodes_linear(node_map: dict[str, SpanTreeNode]) -> set[str]:
+    """
+    Detect all span nodes that belong to directed cycles in O(V + E) time and O(V) space.
+    Uses iterative 3-state path traversal over parent pointers.
+
+    Formal Proof of O(V + E) Time and Space Complexity:
+    - In OpenTelemetry trace data, each span declares at most one parent_span_id.
+      Thus, in the parent-pointer graph G = (V, E), every vertex v in V has out-degree <= 1,
+      guaranteeing |E| <= |V| and O(V + E) = O(V).
+    - Traversal marks visited vertices in a persistent visited set.
+    - Each vertex is visited in at most one path exploration. When exploring from an unvisited
+      vertex, it is added to the active path stack and path_set index lookup.
+    - If a back-edge is encountered (curr in path_set, equivalent to encountering a GREY node in
+      3-color DFS), the directed cycle is identified in O(L) where L <= |V| is the cycle length,
+      and all participating vertices are added to in_cycle.
+    - If an already completed vertex is encountered (curr in visited, equivalent to a BLACK node),
+      traversal terminates in O(1) without re-traversing the parent chain.
+    - When an exploration terminates, all vertices on the path are marked as visited.
+    - Therefore, each vertex and each edge is inspected at most twice (once forward, once on commit),
+      strictly bounding time to O(V + E) = O(V) and auxiliary space to O(V).
+    - This eliminates the quadratic O(N * D) = O(N^2) unmemoized ancestor walk penalty on degenerate
+      linear chains.
+    """
+    visited: set[str] = set()
+    in_cycle: set[str] = set()
+
+    for sid in node_map:
+        if sid in visited:
+            continue
+
+        path: list[str] = []
+        path_set: dict[str, int] = {}
+        curr: Optional[str] = sid
+
+        while curr:
+            if curr in visited:
+                break
+            if curr in path_set:
+                # Cycle detected: back-edge encounter (grey node in 3-color DFS)
+                cycle_start_idx = path_set[curr]
+                for cycle_node_id in path[cycle_start_idx:]:
+                    in_cycle.add(cycle_node_id)
+                break
+
+            path_set[curr] = len(path)
+            path.append(curr)
+
+            curr_node = node_map.get(curr)
+            if not curr_node:
+                break
+            p_id = curr_node.parent_span_id
+            if not p_id or p_id not in node_map:
+                break
+            if p_id == curr:
+                # Self-loop
+                in_cycle.add(curr)
+                break
+            curr = p_id
+
+        for node_id in path:
+            visited.add(node_id)
+
+    return in_cycle
+
+
 def _is_ancestor(
     potential_ancestor_id: str,
     start_node_id: str,
@@ -441,7 +506,8 @@ def _is_ancestor(
     """
     Traverse parent links upward starting from start_node_id to determine if
     potential_ancestor_id is already an ancestor.
-    Returns True if potential_ancestor_id is encountered, preventing cyclic graph edges.
+    Preserved for backward compatibility; internal graph construction uses
+    _detect_cycle_nodes_linear for strict O(V + E) cycle elimination.
     """
     curr_id: Optional[str] = start_node_id
     visited: set[str] = set()
@@ -545,18 +611,24 @@ async def get_trace_tree(
     Retrieve all spans for a trace assembled into an iterative DAG hierarchy / tree.
 
     Formal Time and Space Complexity Guarantees:
-    - Building the node map: O(N) time, O(N) space.
-    - Cycle detection via ancestor walk: O(N * D) worst-case time (where D is tree depth),
-      bounded by O(N^2) on pathological linear inputs, or O(N) with visited markers; O(N) space.
-    - Interval union (active_execution_ms): O(N log N) time for sorting intervals, O(N) space.
-    - Longest path calculation (longest_path_duration_ms): O(N) time on a tree/DAG without
-      cross-branch cycles, O(N) space using iterative DFS stack.
-    - Iterative BFS depth assignment: O(N) time, O(N) space.
-    - Overall complexity: O(N log N) time for normal workloads, O(N^2) worst-case on degenerate
-      linear chains, O(N) space.
+    - Building the node map: O(V) time, O(V) space, where V is span_count.
+    - Linear Cycle Detection (_detect_cycle_nodes_linear): O(V + E) time, O(V) space.
+      In trace trees each span has at most one parent, bounding |E| <= |V| and yielding
+      strictly O(V) time regardless of tree depth or linearity.
+    - Graph Assembly: O(V) time, O(V) space to route roots, orphans, and acyclic children.
+    - Reachability Verification: O(V + E) = O(V) time via iterative BFS.
+    - Interval union (active_execution_ms): O(V log V) time for sorting intervals, O(V) space.
+    - Longest path calculation (longest_path_duration_ms): O(V + E) = O(V) time on acyclic
+      forest using iterative DFS stack, O(V) space.
+    - Iterative BFS depth assignment: O(V + E) = O(V) time, O(V) space.
+    - Iterative JSON serialization: O(V) time, O(V) space.
+    - Overall complexity: O(V log V) time (strictly bounded by interval sorting; all graph
+      assembly, cycle validation, traversal, and serialization operations are strictly O(V + E) = O(V)),
+      completely eliminating the previous quadratic O(N * D) ancestor walk penalty.
+      Space complexity is strictly O(V).
 
     Defensive Invariants:
-    - Children references form a strict acyclic forest (zero RecursionError during Pydantic serialization).
+    - Children references form a strict acyclic forest (zero RecursionError during serialization).
     - Self-loops (parent_span_id == span_id), 2-node mutual loops, and multi-node cycles are
       broken and routed directly to orphans.
     - Missing parent references are categorized into orphans without throwing exceptions.
@@ -601,7 +673,8 @@ async def get_trace_tree(
         if s["end_time_unix_nano"] > max_end:
             max_end = s["end_time_unix_nano"]
 
-    # 2. Iterative Graph Construction in O(N) with cycle prevention
+    # 2. Linear-Time Iterative Graph Construction in O(V + E) with cycle prevention
+    in_cycle = _detect_cycle_nodes_linear(node_map)
     roots: list[SpanTreeNode] = []
     orphans: list[SpanTreeNode] = []
 
@@ -613,12 +686,11 @@ async def get_trace_tree(
         elif parent_id == node.span_id:
             # Self-parent loop guard: break self-reference and route directly to orphans
             orphans.append(node)
+        elif node.span_id in in_cycle:
+            # Cycle detected: break edge to maintain acyclic DAG and route to orphans
+            orphans.append(node)
         elif parent_id in node_map:
-            if _is_ancestor(node.span_id, parent_id, node_map):
-                # Cycle detected: break edge to maintain acyclic DAG and route to orphans
-                orphans.append(node)
-            else:
-                node_map[parent_id].children.append(node)
+            node_map[parent_id].children.append(node)
         else:
             orphans.append(node)
 

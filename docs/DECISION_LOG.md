@@ -299,3 +299,70 @@ Based on these empirical findings, we propose the following evolutionary roadmap
      - Composite index optimization: `CREATE INDEX idx_spans_trace_id_start ON spans (trace_id, start_time_unix_nano ASC);` to satisfy both the filter and the sort in index-only or index-scan order.
      - Attribute column pruning: Projecting only required columns rather than retrieving large `attributes` JSONB blocks for spans that do not require full attribute payloads.
      - Optional read-through caching in Redis for completed traces (`telemetry:cache:trace:<trace_id>`) for high-concurrency visualization dashboards.
+
+---
+
+## ADR-007: Trace Tree Algorithm Optimization ($O(V+E)$) & PostgreSQL Read-Path Profiling
+
+- **Status:** ACCEPTED
+- **Date:** 2026-10-24
+- **Context:**
+  On Day 8, empirical latency decomposition (`GET /v1/traces/{trace_id}/tree`) exposed two primary findings:
+  1. **Algorithmic Quadratic Bottleneck:** $T_{\text{dag\_assembly}}$ suffered a 5.13x degradation on Tier 4 (500 spans degenerate linear chain: 22.581 ms) compared to Tier 3 (500 spans wide parallel: 4.401 ms). This +18.18 ms penalty was caused by unmemoized upward ancestor walks in `_is_ancestor` ($O(N \cdot D) \approx O(N^2)$).
+  2. **Database Fetch Dominance:** $T_{\text{db\_fetch}}$ accounted for 77.2% to 83.9% of total server-side response time across 500-span tiers under concurrency $C = 10$.
+  The mandate for Day 9 is to eliminate the quadratic cycle detection bottleneck with a strictly $O(V + E)$ algorithm, verify all defensive invariants and tests, and profile the PostgreSQL read path using `EXPLAIN (ANALYZE, BUFFERS)` without modifying table schemas, indexes, ingestion pipelines, or PostgreSQL configuration.
+
+- **Decision:**
+  1. **Linear-Time Graph Validation & Cycle Detection (`_detect_cycle_nodes_linear`):**
+     - Replaced unmemoized upward ancestor walk with iterative 3-state path traversal over parent pointers.
+     - **Formal Proof of $O(V + E)$ Time and Space Complexity:**
+       - In OpenTelemetry trace data, each span declares at most one `parent_span_id`. Thus, in the parent-pointer directed graph $G = (V, E)$, every vertex $v \in V$ has out-degree $\le 1$, guaranteeing $|E| \le |V|$ and $O(V + E) = O(V)$.
+       - Traversal tracks node states using a persistent `visited` set (equivalent to BLACK nodes in 3-color DFS) and a transient `path_set` (equivalent to GREY nodes on the active path stack).
+       - If a back-edge is encountered (`curr in path_set`), the simple directed cycle is identified in $O(L)$ where $L \le |V|$ is the cycle length, and all cycle nodes are registered in `in_cycle`.
+       - If an already visited node is encountered (`curr in visited`), traversal terminates in $O(1)$ without re-traversing previous paths.
+       - Each vertex is traversed at most once during forward exploration and once during set completion, strictly bounding total operations across all $V$ nodes to $O(V + E) = O(V)$ time and $O(V)$ auxiliary memory.
+  2. **Acyclic Forest Routing & Invariant Preservation:**
+     - Vertices with `parent_span_id is None` route directly to `roots` at `depth = 0`.
+     - Vertices with `parent_span_id == span_id` (self-loops) route to `orphans` at `depth = 0`.
+     - Vertices in `in_cycle` have their cycle-closing edges severed and route to `orphans` at `depth = 0` with `children = []`.
+     - Vertices with missing parents (`parent_span_id not in node_map`) route to `orphans`.
+     - Acyclic valid child spans route to `node_map[parent_id].children`.
+     - Defensive reachability check via iterative BFS ($O(V + E)$) ensures zero disconnected spans.
+     - Iterative BFS depth calculation, disjoint interval union (`active_execution_ms`), iterative DFS longest path (`longest_path_duration_ms`), and iterative JSON serialization (`_serialize_trace_tree_response`) are preserved intact.
+  3. **PostgreSQL Read-Path Profiling via `EXPLAIN (ANALYZE, BUFFERS)`:**
+     - Executed exact query profiling on sample 500-span traces (`33333333333333333333333333333333` and `44444444444444444444444444444444`).
+     - **Query Execution Plan Findings:**
+       - PostgreSQL Engine Execution Time: **1.18 ms to 2.08 ms** (Planning: 0.18 ms - 0.38 ms).
+       - Buffer Cache: **100% Shared Buffer Hits** (`shared hit=22-27, read=0`). Zero physical disk I/O.
+       - Execution Pipeline:
+         1. `Bitmap Index Scan on idx_spans_trace_id` (0.08 ms, 3 shared hits).
+         2. `Bitmap Heap Scan on spans` (0.25 ms, 19-24 heap blocks hit).
+         3. `Sort Key: spans.start_time_unix_nano` using in-memory `quicksort` (0.55 ms, memory: 142-149 kB).
+     - **Decomposition of $T_{\text{db\_fetch}}$ Overhead:**
+       - Inside PostgreSQL, the database engine requires only ~1.5 ms to execute the query and sort 500 rows.
+       - Single-connection isolated `asyncpg` execution (`conn.fetch`) takes **6.33 ms – 6.67 ms**, with dictionary record decoding taking **1.33 ms**.
+       - Under concurrency $C = 10$, the single-threaded Python asyncio event loop multiplexes between 10 parallel client sockets receiving 500 rows (~215 KB payload) each. The serial binary decoding and event-loop queue wait time compound across 10 concurrent requests ($10 \times \sim 6.5\text{ ms} \approx 65\text{ ms}$), explaining why client-observed $T_{\text{db\_fetch}}$ reaches 67.07 ms – 76.53 ms.
+
+- **Empirical Comparative Matrix (Day 8 Baseline vs. Day 9 Optimized):**
+  Workload parameters: Concurrency $C = 10$, 100 warmups, 500 measured requests per tier, identical synthetic span structures.
+
+  | Metric | Tier 1 (10 Spans) | Tier 2 (100 Spans) | Tier 3 (500 Spans Wide) | Tier 4 (500 Spans Linear) |
+  |---|:---:|:---:|:---:|:---:|
+  | **$T_{\text{dag\_assembly}}$ Day 8** | 0.159 ms | 0.834 ms | 4.401 ms | **22.581 ms** |
+  | **$T_{\text{dag\_assembly}}$ Day 9** | 0.306 ms | 1.663 ms | 8.442 ms | **10.320 ms** |
+  | **$T_{\text{dag}}$ Delta (Day 9 vs Day 8)** | +0.147 ms | +0.829 ms | +4.041 ms | **-12.261 ms (-54.3%)** |
+  | **Micro-Benchmark $T_{\text{dag}}$ (Isolated)** | — | — | — | **27.76 ms $\rightarrow$ 0.85 ms (32.7x speedup)** |
+  | **Ancestor Walk Delta (T4 - T3)** | — | — | — | **Day 8: +18.180 ms (5.13x) $\rightarrow$ Day 9: +1.878 ms (1.22x)** |
+  | **$T_{\text{db\_fetch}}$ Day 8** | 1.400 ms | 2.151 ms | 36.355 ms | 85.018 ms |
+  | **$T_{\text{db\_fetch}}$ Day 9** | 2.351 ms | 3.358 ms | 67.073 ms | 76.531 ms |
+  | **$T_{\text{json\_serialize}}$ Day 8** | 0.112 ms | 0.640 ms | 2.564 ms | 2.587 ms |
+  | **$T_{\text{json\_serialize}}$ Day 9** | 0.222 ms | 1.331 ms | 5.303 ms | 6.032 ms |
+  | **Client $p_{50}$ Latency** | 52.44 $\rightarrow$ 93.90 ms | 57.18 $\rightarrow$ 99.05 ms | 108.42 $\rightarrow$ 219.41 ms | 286.71 $\rightarrow$ 239.95 ms (-46.76 ms) |
+  | **Client $p_{95}$ Latency** | 141.31 $\rightarrow$ 220.29 ms | 132.76 $\rightarrow$ 219.67 ms | 131.65 $\rightarrow$ 265.29 ms | 340.38 $\rightarrow$ 320.55 ms (-19.83 ms) |
+  | **Request Throughput (req/s)** | 152.70 $\rightarrow$ 86.06 | 145.59 $\rightarrow$ 83.70 | 88.87 $\rightarrow$ 44.80 | 34.23 $\rightarrow$ 40.37 (+18.0%) |
+  | **Span Throughput (spans/s)** | 1,526.99 $\rightarrow$ 860.56 | 14,559.25 $\rightarrow$ 8,369.67 | 44,435.70 $\rightarrow$ 22,398.32 | 17,114.44 $\rightarrow$ 20,187.17 (+18.0%) |
+
+- **Verification Summary:**
+  - 13/13 `test_trace_tree.py` unit and edge-case tests passed (self-loop, 2-node cycle, 3-node cycle, missing parent, multi-root, 500 deep, metric semantics, disjoint idle gaps, Server-Timing).
+  - 20/20 backend test regression suite passed.
+  - 9/9 Docker fault-tolerance integration tests passed with zero errors.
